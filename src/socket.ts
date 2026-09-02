@@ -13,9 +13,18 @@ import { error, info, warn } from "./log.js";
 /** Max buffer size per connection (1MB). Messages exceeding this are dropped. */
 const MAX_BUFFER_BYTES = 1 * 1024 * 1024;
 
+/** Defensive upper bound for server.close() to resolve during shutdown. */
+const SHUTDOWN_TIMEOUT_MS = 1000;
+
 /** Active server state, null when not running. */
 let server: Server | null = null;
 let socketPath: string | null = null;
+
+/** Active client sockets; destroyed on shutdown to let server.close() resolve. */
+const connections = new Set<Socket>();
+
+/** True while stop() is in flight, so concurrent calls share the same promise. */
+let stopping: Promise<void> | null = null;
 
 /** Signal handlers registered once. */
 let signalsRegistered = false;
@@ -59,7 +68,11 @@ export async function start(
 	}
 
 	// Create and start the server
-	const srv = createServer((conn) => handleConnection(conn, onMessage));
+	const srv = createServer((conn) => {
+		connections.add(conn);
+		conn.once("close", () => connections.delete(conn));
+		handleConnection(conn, onMessage);
+	});
 
 	await new Promise<void>((resolve, reject) => {
 		srv.once("error", reject);
@@ -83,30 +96,73 @@ export async function start(
 	return true;
 }
 
-/** Close the socket server and remove the socket file. */
+/**
+ * Close the socket server and remove the socket file.
+ *
+ * Forcibly destroys any still-connected clients so server.close() does not
+ * wait for them. A 1s defensive deadline resolves the wait even if a client
+ * refuses to close, so Pi can always shut down deterministically.
+ *
+ * Safe to call repeatedly or concurrently: concurrent calls await the
+ * in-flight shutdown.
+ */
 export async function stop(): Promise<void> {
 	if (!server) return;
+	if (stopping) return stopping;
 
 	const path = socketPath;
-	await new Promise<void>((resolve, reject) => {
-		server!.close((err) => {
-			if (err) reject(err);
-			else resolve();
-		});
-	});
+	const srv = server;
 
-	// Clean up socket file
-	if (path && existsSync(path)) {
-		try {
-			unlinkSync(path);
-		} catch (err) {
-			warn("Failed to remove socket file on shutdown", { path, err: String(err) });
+	stopping = (async () => {
+		// Destroy active clients so their close events fire and server.close()
+		// is not blocked by lingering connections.
+		for (const conn of connections) {
+			try {
+				conn.destroy();
+			} catch {
+				// already closed/closing — ignore
+			}
 		}
-	}
+		connections.clear();
 
-	info("Socket server stopped", { path });
-	server = null;
-	socketPath = null;
+		// Await close with a defensive deadline.
+		let deadlineFired = false;
+		await new Promise<void>((resolve) => {
+			const timer = setTimeout(() => {
+				deadlineFired = true;
+				warn(
+					"Socket server close exceeded deadline; continuing shutdown",
+					{ path, timeoutMs: SHUTDOWN_TIMEOUT_MS },
+				);
+				resolve();
+			}, SHUTDOWN_TIMEOUT_MS);
+
+			srv.close((err) => {
+				if (deadlineFired) return; // deadline already resolved
+				clearTimeout(timer);
+				if (err) {
+					warn("Server close error", { path, err: String(err) });
+				}
+				resolve();
+			});
+		});
+
+		// Clean up socket file regardless of close outcome.
+		if (path && existsSync(path)) {
+			try {
+				unlinkSync(path);
+			} catch (err) {
+				warn("Failed to remove socket file on shutdown", { path, err: String(err) });
+			}
+		}
+
+		info("Socket server stopped", { path });
+		server = null;
+		socketPath = null;
+		stopping = null;
+	})();
+
+	return stopping;
 }
 
 // ---------------------------------------------------------------------------

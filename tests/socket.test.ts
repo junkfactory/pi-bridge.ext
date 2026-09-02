@@ -176,3 +176,80 @@ describe("message handling", () => {
 		expect(received.length).toBe(0);
 	});
 });
+
+describe("shutdown with active clients", () => {
+	it("stops within the deadline when a client is still connected", async () => {
+		await start(sockPath, () => {});
+
+		// Connect a client but don't close it before shutdown — this is the
+		// regression scenario: server.close() would otherwise wait forever
+		// for the client to disconnect.
+		const sock = await connect();
+
+		const stopPromise = stop();
+
+		// 1s shutdown deadline + 500ms safety margin
+		await Promise.race([
+			stopPromise,
+			new Promise<void>((_, reject) =>
+				setTimeout(() => reject(new Error("stop() exceeded deadline")), 1500),
+			),
+		]);
+
+		expect(existsSync(sockPath)).toBe(false);
+
+		// Client must observe the close
+		await waitFor(() => sock.destroyed, 1000);
+		expect(sock.destroyed).toBe(true);
+	});
+
+	it("stops when multiple clients are still connected", async () => {
+		await start(sockPath, () => {});
+
+		const sock1 = await connect();
+		const sock2 = await connect();
+		const sock3 = await connect();
+
+		const stopPromise = stop();
+		await Promise.race([
+			stopPromise,
+			new Promise<void>((_, reject) =>
+				setTimeout(() => reject(new Error("stop() exceeded deadline")), 1500),
+			),
+		]);
+
+		expect(existsSync(sockPath)).toBe(false);
+
+		await waitFor(() => sock1.destroyed && sock2.destroyed && sock3.destroyed, 1000);
+		expect(sock1.destroyed).toBe(true);
+		expect(sock2.destroyed).toBe(true);
+		expect(sock3.destroyed).toBe(true);
+	});
+
+	it("stop() is idempotent and safe to call concurrently", async () => {
+		await start(sockPath, () => {});
+		await connect();
+
+		// Fire multiple concurrent stops; none should throw or hang.
+		const results = await Promise.all([
+			stop(),
+			stop(),
+			stop(),
+		]);
+
+		expect(results.every((r) => r === undefined)).toBe(true);
+		expect(existsSync(sockPath)).toBe(false);
+
+		// A subsequent start() must succeed (state fully reset).
+		const restarted = await start(sockPath, () => {});
+		expect(restarted).toBe(true);
+	});
+
+	it("stop() with no clients still removes the socket file", async () => {
+		await start(sockPath, () => {});
+		expect(existsSync(sockPath)).toBe(true);
+
+		await stop();
+		expect(existsSync(sockPath)).toBe(false);
+	});
+});
