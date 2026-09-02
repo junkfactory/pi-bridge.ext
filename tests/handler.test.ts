@@ -22,25 +22,21 @@ function makePrompt(overrides?: Partial<PromptMessage>): PromptMessage {
 }
 
 describe("handleMessage", () => {
-	it("dispatches prompt with context to sendUserMessage", () => {
+	it("sends raw text to sendUserMessage", () => {
 		const pi = mockPi();
 		handleMessage(pi, makePrompt());
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith(
-			"[file: /home/user/src/main.ts, cwd: /home/user, mode: normal] fix this",
-		);
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix this");
 	});
 
-	it("includes context header with text", () => {
+	it("sends only the text, ignoring context", () => {
 		const pi = mockPi();
 		handleMessage(pi, makePrompt({ text: "hello" }));
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith(
-			"[file: /home/user/src/main.ts, cwd: /home/user, mode: normal] hello",
-		);
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("hello");
 	});
 
-	it("includes filetype when present", () => {
+	it("does not include filetype in message", () => {
 		const pi = mockPi();
 		handleMessage(
 			pi,
@@ -50,12 +46,10 @@ describe("handleMessage", () => {
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith(
-			"[file: /f, cwd: /c, mode: normal, filetype: ts] hello",
-		);
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("hello");
 	});
 
-	it("includes visual mode in context", () => {
+	it("does not include mode in message", () => {
 		const pi = mockPi();
 		handleMessage(
 			pi,
@@ -65,23 +59,6 @@ describe("handleMessage", () => {
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith(
-			"[file: /f, cwd: /c, mode: visual] explain",
-		);
-	});
-
-	it("sends context even when file path is empty", () => {
-		const pi = mockPi();
-		handleMessage(
-			pi,
-			makePrompt({
-				text: "still works",
-				context: { file: "", cwd: "/c", mode: "normal" },
-			}),
-		);
-		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith(
-			"[file: , cwd: /c, mode: normal] still works",
-		);
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("explain");
 	});
 });
