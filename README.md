@@ -73,11 +73,13 @@ JSON over Unix socket, bidirectional:
   "context": {
     "file": "/home/user/project/src/main.lua",
     "cwd": "/home/user/project",
-    "content": "-- buffer or selection content",
-    "mode": "visual"
+    "mode": "normal",
+    "filetype": "lua"
   }
 }
 ```
+
+Context is metadata only — file path, cwd, current mode, and filetype. Buffer/selection content is **not** sent over the socket; the Neovim side handles content injection locally via placeholder substitution (`@this`, `@selection`, `@diagnostics`, etc.) before sending the prompt text.
 
 **pi → Neovim** (events):
 
@@ -129,6 +131,13 @@ The log file is append-only and not rotated automatically. To rotate manually:
 
 # Or remove and let the extension recreate it on next message
 rm ~/.pi/agent/pi-bridge.log
+```
+
+## Running Tests
+
+```bash
+npm install         # install dependencies
+npx vitest run      # run all tests
 ```
 
 ## Related
