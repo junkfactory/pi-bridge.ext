@@ -7,13 +7,47 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { socketPath, ensureSocketDir } from "./path.js";
+import { start, stop } from "./socket.js";
+import { parseMessage } from "./protocol.js";
+import { handleMessage } from "./handler.js";
+import { setLogLevel, info, warn, error } from "./log.js";
+import type { LogLevel } from "./log.js";
 
 export default function (pi: ExtensionAPI) {
+	// Configure log level from env (default: info)
+	const level = (process.env.PI_BRIDGE_LOG_LEVEL ?? "info") as LogLevel;
+	setLogLevel(level);
+
 	pi.on("session_start", async (_event, ctx) => {
-		// TODO: create socket, start listening
+		const cwd = ctx.cwd ?? process.cwd();
+		const path = socketPath(cwd);
+
+		info("Starting pi-bridge extension", { cwd, socketPath: path });
+		ensureSocketDir();
+
+		try {
+			const started = await start(path, (raw) => {
+				const message = parseMessage(raw);
+				if (!message) {
+					warn("Received invalid message", { raw });
+					return;
+				}
+				handleMessage(pi, message);
+			});
+
+			if (started) {
+				info("pi-bridge ready", { socketPath: path });
+			} else {
+				info("pi-bridge socket already in use", { socketPath: path });
+			}
+		} catch (err) {
+			error("Failed to start pi-bridge socket", { err: String(err) });
+		}
 	});
 
 	pi.on("session_shutdown", async () => {
-		// TODO: close socket, cleanup
+		info("Shutting down pi-bridge extension");
+		await stop();
 	});
 }

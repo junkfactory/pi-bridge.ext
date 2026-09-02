@@ -80,6 +80,20 @@ Logs to `~/.pi/agent/pi-bridge.log`:
 - `sendUserMessage()` calls
 - Events pushed to Neovim
 
+### Log Level
+
+Set `PI_BRIDGE_LOG_LEVEL` to control verbosity:
+
+```bash
+# Default: info
+pi -e ./src/index.ts
+
+# Debug: log every message received
+PI_BRIDGE_LOG_LEVEL=debug pi -e ./src/index.ts
+```
+
+Levels: `trace`, `debug`, `info`, `warn`, `error`.
+
 ## Related
 
 - [pi-bridge.nvim](https://github.com/junkfactory/pi-bridge.nvim) — Neovim plugin side
