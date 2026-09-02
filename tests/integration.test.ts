@@ -75,21 +75,18 @@ describe("integration: socket → protocol → handler → pi", () => {
 			context: {
 				file: "/home/user/src/main.ts",
 				cwd: "/home/user",
-				content: "function divide(a, b) {\n  return a / b;\n}",
 				mode: "normal",
 			},
 		}) + "\n";
 		await send(sock, msg);
 		sock.destroy();
 
-		// Verify pi received the formatted message
+		// Verify pi received the raw text exactly
 		await waitFor(() => pi.sendUserMessage.mock.calls.length === 1);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 
 		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("File: /home/user/src/main.ts");
-		expect(call).toContain("add error handling");
-		expect(call).toContain("function divide(a, b)");
+		expect(call).toBe("add error handling");
 	});
 
 	it("delivers visual mode context", async () => {
@@ -107,7 +104,6 @@ describe("integration: socket → protocol → handler → pi", () => {
 			context: {
 				file: "/home/user/src/utils.ts",
 				cwd: "/home/user",
-				content: "const x = 1;\nconst y = 2;",
 				mode: "visual",
 			},
 		}) + "\n";
@@ -116,8 +112,7 @@ describe("integration: socket → protocol → handler → pi", () => {
 
 		await waitFor(() => pi.sendUserMessage.mock.calls.length === 1);
 		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("Visual selection");
-		expect(call).toContain("File: /home/user/src/utils.ts");
+		expect(call).toBe("explain this");
 	});
 
 	it("drops invalid messages silently", async () => {

@@ -26,86 +26,124 @@ describe("handleMessage", () => {
 		const pi = mockPi();
 		handleMessage(pi, makePrompt());
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix this");
 	});
 
-	it("includes file path in formatted message", () => {
+	it("sends user text directly", () => {
 		const pi = mockPi();
-		handleMessage(pi, makePrompt());
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("File: /home/user/src/main.ts");
+		handleMessage(pi, makePrompt({ text: "hello" }));
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("hello");
 	});
 
-	it("includes user text in formatted message", () => {
+	it("sends the message text verbatim", () => {
 		const pi = mockPi();
 		handleMessage(pi, makePrompt({ text: "add error handling" }));
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("add error handling");
-	});
-
-	it("includes visual selection content in fenced block", () => {
-		const pi = mockPi();
-		handleMessage(pi, makePrompt({ context: { file: "/f", cwd: "/c", content: "selected text", mode: "visual" } }));
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("```");
-		expect(call).toContain("selected text");
-	});
-
-	it("marks visual mode in formatted message", () => {
-		const pi = mockPi();
-		handleMessage(pi, makePrompt({ context: { file: "/f", cwd: "/c", content: "selected text", mode: "visual" } }));
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("Visual selection");
-	});
-
-	it("omits visual marker in normal mode", () => {
-		const pi = mockPi();
-		handleMessage(pi, makePrompt());
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).not.toContain("Visual selection");
-	});
-
-	it("handles empty file path gracefully", () => {
-		const pi = mockPi();
-		handleMessage(pi, makePrompt({ context: { file: "", cwd: "/c", mode: "normal" } }));
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).not.toContain("File:");
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("add error handling");
 	});
 
-	it("includes cursor position on file line", () => {
+	it("ignores context fields and sends only text", () => {
 		const pi = mockPi();
-		handleMessage(pi, makePrompt({ context: { file: "/f.ts", cwd: "/c", mode: "normal", cursor: { line: 42, col: 8 } } }));
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("File: /f.ts (line 42, col 8)");
+		handleMessage(
+			pi,
+			makePrompt({
+				text: "hello",
+				context: { file: "/f", cwd: "/c", mode: "normal", filetype: "ts" },
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("hello");
 	});
 
-	it("includes language when filetype is provided", () => {
+	it("sends text for visual mode", () => {
 		const pi = mockPi();
-		handleMessage(pi, makePrompt({ context: { file: "/f.ts", cwd: "/c", mode: "normal", filetype: "typescript" } }));
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("Language: typescript");
+		handleMessage(
+			pi,
+			makePrompt({
+				text: "explain",
+				context: { file: "/f", cwd: "/c", mode: "visual" },
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("explain");
 	});
 
-	it("includes current line in normal mode", () => {
+	it("sends text even when file path is empty", () => {
 		const pi = mockPi();
-		handleMessage(pi, makePrompt({ context: { file: "/f", cwd: "/c", mode: "normal", current_line: "local x = 1" } }));
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("Current line: `local x = 1`");
+		handleMessage(
+			pi,
+			makePrompt({
+				text: "still works",
+				context: { file: "", cwd: "/c", mode: "normal" },
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("still works");
 	});
 
-	it("includes surrounding code in normal mode", () => {
+	it("ignores cursor in context", () => {
 		const pi = mockPi();
-		handleMessage(pi, makePrompt({ context: { file: "/f", cwd: "/c", mode: "normal", surrounding: "line1\nline2" } }));
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("Surrounding code:");
-		expect(call).toContain("line1\nline2");
+		handleMessage(
+			pi,
+			makePrompt({
+				text: "go",
+				context: { file: "/f.ts", cwd: "/c", mode: "normal", cursor: { line: 42, col: 8 } },
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("go");
 	});
 
-	it("prefers content over surrounding when both present", () => {
+	it("ignores content selection in context", () => {
 		const pi = mockPi();
-		handleMessage(pi, makePrompt({ context: { file: "/f", cwd: "/c", mode: "visual", content: "selection", surrounding: "surround" } }));
-		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toContain("selection");
-		expect(call).not.toContain("Surrounding code:");
+		handleMessage(
+			pi,
+			makePrompt({
+				text: "review",
+				context: { file: "/f", cwd: "/c", content: "selected text", mode: "visual" },
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("review");
+	});
+
+	it("ignores surrounding code in context", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				text: "fix",
+				context: { file: "/f", cwd: "/c", mode: "normal", surrounding: "line1\nline2" },
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix");
+	});
+
+	it("ignores current_line in context", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				text: "why",
+				context: { file: "/f", cwd: "/c", mode: "normal", current_line: "local x = 1" },
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("why");
+	});
+
+	it("ignores filetype in context", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				text: "ok",
+				context: { file: "/f.ts", cwd: "/c", mode: "normal", filetype: "typescript" },
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("ok");
 	});
 });
