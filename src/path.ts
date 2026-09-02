@@ -11,9 +11,16 @@ import { join } from "node:path";
 
 const SOCKET_DIR = ".pi/agent/pi-bridge/sockets";
 
-/** SHA256 of absolute cwd, hex-encoded (64 chars). */
+/**
+ * SHA256 of cwd, truncated to 16 hex chars.
+ *
+ * Full 64-char hashes push the socket path past the 104-byte sun_path
+ * limit on macOS (e.g. ~/.pi/agent/pi-bridge/sockets/<hash>.sock = 120 bytes).
+ * 16 hex chars (64 bits) still give collision resistance far beyond what's
+ * needed for local cwd disambiguation.
+ */
 export function hashCwd(cwd: string): string {
-	return createHash("sha256").update(cwd).digest("hex");
+	return createHash("sha256").update(cwd).digest("hex").slice(0, 16);
 }
 
 /** Full socket path for the given cwd. */

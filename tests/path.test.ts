@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import { hashCwd, socketPath } from "../src/path.js";
 
 describe("hashCwd", () => {
-	it("returns 64-char hex string", () => {
+	it("returns 16-char hex string", () => {
 		const hash = hashCwd("/home/user/project");
-		expect(hash).toHaveLength(64);
-		expect(hash).toMatch(/^[0-9a-f]{64}$/);
+		expect(hash).toHaveLength(16);
+		expect(hash).toMatch(/^[0-9a-f]{16}$/);
 	});
 
 	it("is deterministic", () => {
