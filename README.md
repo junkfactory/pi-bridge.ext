@@ -15,8 +15,33 @@ This extension opens a Unix socket on session start, listens for incoming messag
 
 ## Install
 
+### Production
+
 ```bash
 pi install git:github.com/junkfactory/pi-bridge.ext
+```
+
+### Development
+
+Clone the repo and install from the local path:
+
+```bash
+git clone https://github.com/junkfactory/pi-bridge.ext.git /path/to/pi-bridge.ext
+cd /path/to/pi-bridge.ext
+npm install          # install dependencies
+pi install .         # install from local directory
+```
+
+Edits under `src/` require a rebuild before pi picks them up:
+
+```bash
+npm run build        # or: npx tsc
+```
+
+Alternatively, install from a sibling checkout next to pi-bridge.nvim:
+
+```bash
+pi install /path/to/pi-bridge.ext
 ```
 
 ## How It Works
