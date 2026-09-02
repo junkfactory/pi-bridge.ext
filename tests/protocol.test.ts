@@ -18,7 +18,6 @@ describe("parseMessage", () => {
 		context: {
 			file: "/home/user/src/main.ts",
 			cwd: "/home/user",
-			content: "const x = 1;",
 			mode: "normal",
 		},
 	};
@@ -67,12 +66,11 @@ describe("parseMessage", () => {
 		expect(parseMessage(JSON.stringify({ type: "prompt", text: "hi" }))).toBeNull();
 	});
 
-	it("returns null for prompt with missing context fields", () => {
+	it("returns null for prompt with missing required context fields", () => {
 		const cases = [
-			{ cwd: "/home/user", content: "x", mode: "normal" }, // missing file
-			{ file: "/f", content: "x", mode: "normal" }, // missing cwd
-			{ file: "/f", cwd: "/h", mode: "normal" }, // missing content
-			{ file: "/f", cwd: "/h", content: "x" }, // missing mode
+			{ cwd: "/home/user", mode: "normal" }, // missing file
+			{ file: "/f", mode: "normal" }, // missing cwd
+			{ file: "/f", cwd: "/h" }, // missing mode
 		];
 		for (const ctx of cases) {
 			expect(parseMessage(JSON.stringify({ type: "prompt", text: "hi", context: ctx }))).toBeNull();
@@ -89,6 +87,70 @@ describe("parseMessage", () => {
 				}),
 			),
 		).toBeNull();
+	});
+
+	it("parses prompt without content (normal mode)", () => {
+		const msg = parseMessage(JSON.stringify(validPrompt));
+		expect(msg).not.toBeNull();
+		if (msg?.type === "prompt") {
+			expect(msg.context.content).toBeUndefined();
+		}
+	});
+
+	it("parses prompt with optional context fields", () => {
+		const full: PromptMessage = {
+			type: "prompt",
+			text: "explain",
+			context: {
+				file: "/f.ts",
+				cwd: "/",
+				mode: "normal",
+				content: "const x = 1;",
+				filetype: "typescript",
+				cursor: { line: 5, col: 10 },
+				current_line: "const x = 1;",
+				surrounding: "line1\nline2",
+			},
+		};
+		const msg = parseMessage(JSON.stringify(full));
+		expect(msg).toEqual(full);
+	});
+
+	it("ignores invalid optional fields", () => {
+		const msg = parseMessage(
+			JSON.stringify({
+				type: "prompt",
+				text: "hi",
+				context: {
+					...validPrompt.context,
+					filetype: 42,
+					cursor: "bad",
+					current_line: 123,
+					surrounding: true,
+				},
+			}),
+		);
+		expect(msg).not.toBeNull();
+		if (msg?.type === "prompt") {
+			expect(msg.context.filetype).toBeUndefined();
+			expect(msg.context.cursor).toBeUndefined();
+			expect(msg.context.current_line).toBeUndefined();
+			expect(msg.context.surrounding).toBeUndefined();
+		}
+	});
+
+	it("rejects cursor with missing fields", () => {
+		const msg = parseMessage(
+			JSON.stringify({
+				type: "prompt",
+				text: "hi",
+				context: { ...validPrompt.context, cursor: { line: 1 } },
+			}),
+		);
+		expect(msg).not.toBeNull();
+		if (msg?.type === "prompt") {
+			expect(msg.context.cursor).toBeUndefined();
+		}
 	});
 });
 
@@ -159,7 +221,7 @@ describe("frameBuffer", () => {
 	});
 
 	it("handles multiple messages in one chunk", () => {
-		const msg1 = JSON.stringify({ type: "prompt", text: "a", context: { file: "/f", cwd: "/c", content: "x", mode: "normal" } });
+		const msg1 = JSON.stringify({ type: "prompt", text: "a", context: { file: "/f", cwd: "/c", mode: "normal" } });
 		const msg2 = JSON.stringify({ type: "prompt", text: "b", context: { file: "/f", cwd: "/c", content: "y", mode: "visual" } });
 		const buf = msg1 + "\n" + msg2 + "\n";
 		const { messages, remainder } = frameBuffer(buf);

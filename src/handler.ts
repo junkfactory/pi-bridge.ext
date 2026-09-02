@@ -34,7 +34,14 @@ function handlePrompt(pi: ExtensionAPI, message: PromptMessage): void {
 
 	// Context preamble
 	if (context.file) {
-		parts.push(`File: ${context.file}`);
+		let location = `File: ${context.file}`;
+		if (context.cursor) {
+			location += ` (line ${context.cursor.line}, col ${context.cursor.col})`;
+		}
+		parts.push(location);
+	}
+	if (context.filetype) {
+		parts.push(`Language: ${context.filetype}`);
 	}
 	if (context.mode === "visual") {
 		parts.push("(Visual selection)");
@@ -44,11 +51,23 @@ function handlePrompt(pi: ExtensionAPI, message: PromptMessage): void {
 	parts.push("");
 	parts.push(text);
 
-	// Code context (if provided)
+	// Current line (normal mode)
+	if (context.current_line) {
+		parts.push("");
+		parts.push(`Current line: \`${context.current_line}\``);
+	}
+
+	// Code context — visual selection or surrounding lines
 	if (context.content) {
 		parts.push("");
 		parts.push("```");
 		parts.push(context.content);
+		parts.push("```");
+	} else if (context.surrounding) {
+		parts.push("");
+		parts.push("Surrounding code:");
+		parts.push("```");
+		parts.push(context.surrounding);
 		parts.push("```");
 	}
 

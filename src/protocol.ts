@@ -19,8 +19,12 @@ export interface PromptMessage {
 	context: {
 		file: string;
 		cwd: string;
-		content: string;
+		content?: string;
 		mode: "normal" | "visual";
+		filetype?: string;
+		cursor?: { line: number; col: number };
+		current_line?: string;
+		surrounding?: string;
 	};
 }
 
@@ -101,21 +105,28 @@ function parsePromptMessage(obj: Record<string, unknown>): PromptMessage | null 
 	const ctx = obj.context;
 	if (typeof ctx.file !== "string") return null;
 	if (typeof ctx.cwd !== "string") return null;
-	if (typeof ctx.content !== "string") return null;
 	if (ctx.mode !== "normal" && ctx.mode !== "visual") return null;
 
-	return {
-		type: "prompt",
-		text: obj.text,
-		context: {
-			file: ctx.file,
-			cwd: ctx.cwd,
-			content: ctx.content,
-			mode: ctx.mode,
-		},
+	const context: PromptMessage["context"] = {
+		file: ctx.file,
+		cwd: ctx.cwd,
+		mode: ctx.mode,
 	};
+
+	if (typeof ctx.content === "string") context.content = ctx.content;
+	if (typeof ctx.filetype === "string") context.filetype = ctx.filetype;
+	if (typeof ctx.current_line === "string") context.current_line = ctx.current_line;
+	if (typeof ctx.surrounding === "string") context.surrounding = ctx.surrounding;
+	if (isCursor(ctx.cursor)) context.cursor = ctx.cursor;
+
+	return { type: "prompt", text: obj.text, context };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCursor(value: unknown): value is { line: number; col: number } {
+	if (!isRecord(value)) return false;
+	return typeof value.line === "number" && typeof value.col === "number";
 }
