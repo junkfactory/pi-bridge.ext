@@ -1,0 +1,23 @@
+{
+  "name": "pi-bridge.ext",
+  "version": "0.1.0",
+  "description": "Pi extension for Neovim integration via Unix socket",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "@types/node": "^26.4.1",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}
