@@ -157,4 +157,22 @@ describe("message handling", () => {
 		sock1.destroy();
 		sock2.destroy();
 	});
+
+	it("drops connection on buffer overflow", async () => {
+		const received: string[] = [];
+		await start(sockPath, (msg) => received.push(msg));
+
+		const sock = await connect();
+		// Send 2MB of data without a newline (exceeds 1MB limit)
+		const big = "x".repeat(2 * 1024 * 1024);
+		try {
+			await send(sock, big);
+		} catch {
+			// Expected: write may fail when server destroys the connection
+		}
+
+		// Connection should be destroyed, no messages received
+		await new Promise((r) => setTimeout(r, 200));
+		expect(received.length).toBe(0);
+	});
 });

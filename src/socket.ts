@@ -10,6 +10,9 @@ import { existsSync, unlinkSync, chmodSync } from "node:fs";
 import { frameBuffer } from "./protocol.js";
 import { error, info, warn } from "./log.js";
 
+/** Max buffer size per connection (1MB). Messages exceeding this are dropped. */
+const MAX_BUFFER_BYTES = 1 * 1024 * 1024;
+
 /** Active server state, null when not running. */
 let server: Server | null = null;
 let socketPath: string | null = null;
@@ -138,6 +141,15 @@ function handleConnection(conn: Socket, onMessage: (data: string) => void): void
 
 	conn.on("data", (chunk: Buffer) => {
 		buffer += chunk.toString();
+
+		// Guard against oversized buffers (malicious or broken client)
+		if (buffer.length > MAX_BUFFER_BYTES) {
+			warn("Buffer overflow, dropping connection", { size: buffer.length });
+			buffer = "";
+			conn.destroy();
+			return;
+		}
+
 		const { messages, remainder } = frameBuffer(buffer);
 		buffer = remainder;
 

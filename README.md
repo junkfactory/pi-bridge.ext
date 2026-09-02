@@ -94,6 +94,18 @@ PI_BRIDGE_LOG_LEVEL=debug pi -e ./src/index.ts
 
 Levels: `trace`, `debug`, `info`, `warn`, `error`.
 
+### Log Rotation
+
+The log file is append-only and not rotated automatically. To rotate manually:
+
+```bash
+# Truncate (keeps file handle valid)
+: > ~/.pi/agent/pi-bridge.log
+
+# Or remove and let the extension recreate it on next message
+rm ~/.pi/agent/pi-bridge.log
+```
+
 ## Related
 
 - [pi-bridge.nvim](https://github.com/junkfactory/pi-bridge.nvim) — Neovim plugin side
