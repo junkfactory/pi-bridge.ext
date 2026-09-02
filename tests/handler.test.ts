@@ -22,28 +22,25 @@ function makePrompt(overrides?: Partial<PromptMessage>): PromptMessage {
 }
 
 describe("handleMessage", () => {
-	it("dispatches prompt to sendUserMessage", () => {
+	it("dispatches prompt with context to sendUserMessage", () => {
 		const pi = mockPi();
 		handleMessage(pi, makePrompt());
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix this");
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"[file: /home/user/src/main.ts, cwd: /home/user, mode: normal] fix this",
+		);
 	});
 
-	it("sends user text directly", () => {
+	it("includes context header with text", () => {
 		const pi = mockPi();
 		handleMessage(pi, makePrompt({ text: "hello" }));
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("hello");
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"[file: /home/user/src/main.ts, cwd: /home/user, mode: normal] hello",
+		);
 	});
 
-	it("sends the message text verbatim", () => {
-		const pi = mockPi();
-		handleMessage(pi, makePrompt({ text: "add error handling" }));
-		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("add error handling");
-	});
-
-	it("ignores context fields and sends only text", () => {
+	it("includes filetype when present", () => {
 		const pi = mockPi();
 		handleMessage(
 			pi,
@@ -53,10 +50,12 @@ describe("handleMessage", () => {
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("hello");
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"[file: /f, cwd: /c, mode: normal, filetype: ts] hello",
+		);
 	});
 
-	it("sends text for visual mode", () => {
+	it("includes visual mode in context", () => {
 		const pi = mockPi();
 		handleMessage(
 			pi,
@@ -66,10 +65,12 @@ describe("handleMessage", () => {
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("explain");
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"[file: /f, cwd: /c, mode: visual] explain",
+		);
 	});
 
-	it("sends text even when file path is empty", () => {
+	it("sends context even when file path is empty", () => {
 		const pi = mockPi();
 		handleMessage(
 			pi,
@@ -79,71 +80,8 @@ describe("handleMessage", () => {
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("still works");
-	});
-
-	it("ignores cursor in context", () => {
-		const pi = mockPi();
-		handleMessage(
-			pi,
-			makePrompt({
-				text: "go",
-				context: { file: "/f.ts", cwd: "/c", mode: "normal", cursor: { line: 42, col: 8 } },
-			}),
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"[file: , cwd: /c, mode: normal] still works",
 		);
-		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("go");
-	});
-
-	it("ignores content selection in context", () => {
-		const pi = mockPi();
-		handleMessage(
-			pi,
-			makePrompt({
-				text: "review",
-				context: { file: "/f", cwd: "/c", content: "selected text", mode: "visual" },
-			}),
-		);
-		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("review");
-	});
-
-	it("ignores surrounding code in context", () => {
-		const pi = mockPi();
-		handleMessage(
-			pi,
-			makePrompt({
-				text: "fix",
-				context: { file: "/f", cwd: "/c", mode: "normal", surrounding: "line1\nline2" },
-			}),
-		);
-		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix");
-	});
-
-	it("ignores current_line in context", () => {
-		const pi = mockPi();
-		handleMessage(
-			pi,
-			makePrompt({
-				text: "why",
-				context: { file: "/f", cwd: "/c", mode: "normal", current_line: "local x = 1" },
-			}),
-		);
-		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("why");
-	});
-
-	it("ignores filetype in context", () => {
-		const pi = mockPi();
-		handleMessage(
-			pi,
-			makePrompt({
-				text: "ok",
-				context: { file: "/f.ts", cwd: "/c", mode: "normal", filetype: "typescript" },
-			}),
-		);
-		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("ok");
 	});
 });

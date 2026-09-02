@@ -18,7 +18,7 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 	error: 4,
 };
 
-const LOG_PATH = join(
+export const LOG_PATH = join(
 	process.env.HOME ?? "",
 	".pi/agent/pi-bridge.log",
 );

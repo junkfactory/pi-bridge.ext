@@ -11,7 +11,7 @@ import { socketPath, ensureSocketDir } from "./path.js";
 import { start, stop } from "./socket.js";
 import { parseMessage } from "./protocol.js";
 import { handleMessage } from "./handler.js";
-import { setLogLevel, info, warn, error } from "./log.js";
+import { setLogLevel, info, warn, error, LOG_PATH } from "./log.js";
 import type { LogLevel } from "./log.js";
 
 export default function (pi: ExtensionAPI) {
@@ -23,7 +23,7 @@ export default function (pi: ExtensionAPI) {
 		const cwd = ctx.cwd ?? process.cwd();
 		const path = socketPath(cwd);
 
-		info("Starting pi-bridge extension", { cwd, socketPath: path });
+		info("Starting pi-bridge extension", { cwd, socketPath: path, logPath: LOG_PATH });
 		ensureSocketDir();
 
 		try {

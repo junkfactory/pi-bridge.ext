@@ -23,9 +23,13 @@ export function handleMessage(pi: ExtensionAPI, message: InboundMessage): void {
 /**
  * Send a prompt message to pi as a user message.
  *
- * The Neovim side is responsible for shaping the text it sends; the
- * handler passes the message through verbatim.
+ * Prepends editor context (file, cwd, mode) so the agent can see
+ * where the message originated.
  */
 function handlePrompt(pi: ExtensionAPI, message: PromptMessage): void {
-	pi.sendUserMessage(message.text);
+	const { context, text } = message;
+	const parts = [`file: ${context.file}`, `cwd: ${context.cwd}`, `mode: ${context.mode}`];
+	if (context.filetype) parts.push(`filetype: ${context.filetype}`);
+	const header = `[${parts.join(", ")}]`;
+	pi.sendUserMessage(`${header} ${text}`);
 }
