@@ -58,7 +58,7 @@ pi install /path/to/pi-bridge.ext
 ~/.pi/agent/pi-bridge/sockets/<sha256>.sock
 ```
 
-The hash is SHA256 of the absolute cwd, hex-encoded (64 chars). This gives each project directory its own socket with no collisions.
+The hash is SHA256 of the absolute cwd, hex-encoded and truncated to 16 characters. This gives each project directory its own socket with no collisions.
 
 ### Message Protocol
 
