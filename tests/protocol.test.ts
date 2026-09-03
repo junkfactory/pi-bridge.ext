@@ -126,9 +126,8 @@ describe("parseMessage", () => {
 describe("serializeEvent", () => {
 	it("produces newline-terminated JSON", () => {
 		const event: OutboundEvent = {
-			type: "event",
-			event: "agent_end",
-			data: { summary: "done" },
+			type: "agent_end",
+			message: "done",
 		};
 		const raw = serializeEvent(event);
 		expect(raw.endsWith(FRAME_DELIMITER)).toBe(true);
@@ -139,9 +138,8 @@ describe("serializeEvent", () => {
 	it("round-trips through parseMessage is not applicable (different direction)", () => {
 		// Outbound events are not inbound messages — just verify serialization
 		const event: OutboundEvent = {
-			type: "event",
-			event: "tool_start",
-			data: { tool: "bash" },
+			type: "agent_start",
+			message: "working...",
 		};
 		const raw = serializeEvent(event);
 		expect(JSON.parse(raw.trim())).toEqual(event);

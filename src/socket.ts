@@ -8,7 +8,7 @@
 import { createServer, type Server, type Socket } from "node:net";
 import { existsSync, unlinkSync, chmodSync } from "node:fs";
 import { frameBuffer } from "./protocol.js";
-import { error, info, warn } from "./log.js";
+import { debug, error, info, warn } from "./log.js";
 
 /** Max buffer size per connection (1MB). Messages exceeding this are dropped. */
 const MAX_BUFFER_BYTES = 1 * 1024 * 1024;
@@ -163,6 +163,25 @@ export async function stop(): Promise<void> {
 	})();
 
 	return stopping;
+}
+
+/**
+ * Write a message to all connected clients.
+ *
+ * Iterates active connections and writes the data to each socket that
+ * is not destroyed. Logs each broadcast at debug level.
+ */
+export function broadcast(data: string): void {
+	debug("Broadcasting to connections", { count: connections.size, data: data.trim() });
+	for (const conn of connections) {
+		if (!conn.destroyed) {
+			try {
+				conn.write(data);
+			} catch (err) {
+				warn("Failed to write to client", { err: String(err) });
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

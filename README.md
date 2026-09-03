@@ -11,7 +11,7 @@ Pi extension for Neovim integration via Unix socket. Pairs with [pi-bridge.nvim]
 └─────────────┘                     └─────────────────┘
 ```
 
-This extension opens a Unix socket on session start, listens for incoming messages from Neovim, and calls `pi.sendUserMessage()` to inject them into the session. It can also push events back to Neovim (agent started, file edited, etc.).
+This extension opens a Unix socket on session start, listens for incoming messages from Neovim, and calls `pi.sendUserMessage()` to inject them into the session. It also pushes `agent_start` and `agent_end` events back to Neovim.
 
 ## Install
 
@@ -85,9 +85,8 @@ Context is metadata only — file path, cwd, current mode, and filetype. Buffer/
 
 ```json
 {
-  "type": "event",
-  "event": "agent_end",
-  "data": { "summary": "Completed 3 tool calls" }
+  "type": "agent_end",
+  "message": "done"
 }
 ```
 

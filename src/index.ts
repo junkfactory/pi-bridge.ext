@@ -8,8 +8,9 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { socketPath, ensureSocketDir } from "./path.js";
-import { start, stop } from "./socket.js";
-import { parseMessage } from "./protocol.js";
+import { broadcast, start, stop } from "./socket.js";
+import { parseMessage, serializeEvent } from "./protocol.js";
+import type { OutboundEvent } from "./protocol.js";
 import { handleMessage } from "./handler.js";
 import { setLogLevel, info, warn, error, LOG_PATH } from "./log.js";
 import type { LogLevel } from "./log.js";
@@ -44,6 +45,20 @@ export default function (pi: ExtensionAPI) {
 		} catch (err) {
 			error("Failed to start pi-bridge socket", { err: String(err) });
 		}
+	});
+
+	pi.on("agent_start", (_event, ctx) => {
+		const cwd = ctx.cwd ?? process.cwd();
+		const event: OutboundEvent = { type: "agent_start", message: "working..." };
+		info("Agent started", { cwd });
+		broadcast(serializeEvent(event));
+	});
+
+	pi.on("agent_end", (_event, ctx) => {
+		const cwd = ctx.cwd ?? process.cwd();
+		const event: OutboundEvent = { type: "agent_end", message: "done" };
+		info("Agent completed", { cwd });
+		broadcast(serializeEvent(event));
 	});
 
 	pi.on("session_shutdown", async () => {

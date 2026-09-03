@@ -7,13 +7,15 @@
  */
 
 import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
-import { start, stop } from "../src/socket.js";
+import { start, stop, broadcast } from "../src/socket.js";
 import { parseMessage } from "../src/protocol.js";
 import { handleMessage } from "../src/handler.js";
+import index from "../src/index.js";
 import { createConnection } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 let tmpDir: string;
 let sockPath: string;
@@ -130,5 +132,83 @@ describe("integration: socket → protocol → handler → pi", () => {
 
 		await new Promise((r) => setTimeout(r, 200));
 		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Mock ExtensionAPI for testing agent_start / agent_end hooks from index.ts
+// ---------------------------------------------------------------------------
+
+function createMockPi(): ExtensionAPI & { handlers: Record<string, Function> } {
+	const handlers: Record<string, Function> = {};
+	return {
+		on(event: string, handler: Function) {
+			handlers[event] = handler;
+		},
+		handlers,
+		sendUserMessage: vi.fn(),
+	} as any;
+}
+
+describe("integration: agent_start and agent_end hooks", () => {
+	it("agent_start broadcasts to connected clients", async () => {
+		await start(sockPath, () => {});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+
+		const sock = await connect();
+		const received: string[] = [];
+		sock.on("data", (chunk) => received.push(chunk.toString()));
+
+		// Simulate pi firing agent_start
+		mockPi.handlers["agent_start"]({}, { cwd: "/project" });
+
+		await waitFor(() => received.length === 1);
+		const msg = JSON.parse(received[0].trim());
+		expect(msg).toEqual({ type: "agent_start", message: "working..." });
+		sock.destroy();
+	});
+
+	it("agent_end broadcasts to connected clients", async () => {
+		await start(sockPath, () => {});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+
+		const sock = await connect();
+		const received: string[] = [];
+		sock.on("data", (chunk) => received.push(chunk.toString()));
+
+		// Simulate pi firing agent_end
+		mockPi.handlers["agent_end"]({}, { cwd: "/project" });
+
+		await waitFor(() => received.length === 1);
+		const msg = JSON.parse(received[0].trim());
+		expect(msg).toEqual({ type: "agent_end", message: "done" });
+		sock.destroy();
+	});
+
+	it("agent_start and agent_end both fire in sequence", async () => {
+		await start(sockPath, () => {});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+
+		const sock = await connect();
+		const received: string[] = [];
+		sock.on("data", (chunk) => received.push(chunk.toString()));
+
+		mockPi.handlers["agent_start"]({}, { cwd: "/project" });
+		await waitFor(() => received.length === 1);
+
+		mockPi.handlers["agent_end"]({}, { cwd: "/project" });
+		await waitFor(() => received.length === 2);
+
+		const startMsg = JSON.parse(received[0].trim());
+		const endMsg = JSON.parse(received[1].trim());
+		expect(startMsg).toEqual({ type: "agent_start", message: "working..." });
+		expect(endMsg).toEqual({ type: "agent_end", message: "done" });
+		sock.destroy();
 	});
 });

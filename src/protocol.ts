@@ -30,9 +30,8 @@ export interface PromptMessage {
 
 /** Event pushed to Neovim. */
 export interface OutboundEvent {
-	type: "event";
-	event: string;
-	data: Record<string, unknown>;
+	type: "agent_start" | "agent_end";
+	message: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
-import { start, stop } from "../src/socket.js";
+import { start, stop, broadcast } from "../src/socket.js";
 import { createConnection } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -174,6 +174,59 @@ describe("message handling", () => {
 		// Connection should be destroyed, no messages received
 		await new Promise((r) => setTimeout(r, 200));
 		expect(received.length).toBe(0);
+	});
+});
+
+describe("broadcast", () => {
+	it("sends data to multiple clients", async () => {
+		await start(sockPath, () => {});
+
+		const sock1 = await connect();
+		const sock2 = await connect();
+
+		// Both clients should receive the data
+		const received1: string[] = [];
+		const received2: string[] = [];
+		sock1.on("data", (chunk) => received1.push(chunk.toString()));
+		sock2.on("data", (chunk) => received2.push(chunk.toString()));
+
+		const data = '{"type":"agent_start","message":"working..."}\n';
+		broadcast(data);
+
+		await waitFor(() => received1.length > 0 && received2.length > 0);
+		expect(received1[0]).toBe(data);
+		expect(received2[0]).toBe(data);
+
+		sock1.destroy();
+		sock2.destroy();
+	});
+
+	it("skips destroyed clients", async () => {
+		await start(sockPath, () => {});
+
+		const sock1 = await connect();
+		const sock2 = await connect();
+
+			// Destroy sock1 before broadcasting
+			sock1.destroy();
+			await waitFor(() => sock1.destroyed);
+
+		const data = '{"type":"agent_end","message":"done"}\n';
+
+		const received2: string[] = [];
+			sock2.on("data", (chunk) => received2.push(chunk.toString()));
+
+			broadcast(data);
+
+			await waitFor(() => received2.length > 0);
+			expect(received2[0]).toBe(data);
+
+			sock2.destroy();
+	});
+
+	it("is a noop with no connections", () => {
+		// Should not throw when there are no connections
+		expect(() => broadcast('{"type":"test"}\n')).not.toThrow();
 	});
 });
 
