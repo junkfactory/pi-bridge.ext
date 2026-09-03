@@ -74,12 +74,26 @@ JSON over Unix socket, bidirectional:
     "file": "/home/user/project/src/main.lua",
     "cwd": "/home/user/project",
     "mode": "normal",
-    "filetype": "lua"
+    "filetype": "lua",
+    "buffer_state": "saved"
   }
 }
 ```
 
 Context is metadata only — file path, cwd, current mode, and filetype. Buffer/selection content is **not** sent over the socket; the Neovim side handles content injection locally via placeholder substitution (`@this`, `@selection`, `@diagnostics`, etc.) before sending the prompt text.
+
+#### `buffer_state` (optional)
+
+String indicating the buffer's save state. When present, the handler uses it to emit tailored hints instead of file links. Valid values: `"nameless"`, `"scratch"`, `"unsaved"`, `"modified"`, `"saved"`.
+
+| State | What pi sees |
+|---|---|
+| `saved` | Clickable file link |
+| `modified` | Hint that the file may have unsaved changes |
+| `unsaved` / `nameless` | Hint that the buffer is unsaved (no file path) |
+| `scratch` | Hint that the path is an ephemeral scratch copy |
+
+When `buffer_state` is absent (e.g. from an older nvim plugin), the handler falls back to checking whether the file exists on disk via `existsSync`.
 
 **pi → Neovim** (events):
 

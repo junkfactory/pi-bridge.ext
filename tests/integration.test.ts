@@ -78,6 +78,7 @@ describe("integration: socket → protocol → handler → pi", () => {
 				file: "/home/user/src/main.ts",
 				cwd: "/home/user",
 				mode: "normal",
+				buffer_state: "saved",
 			},
 		}) + "\n";
 		await send(sock, msg);
@@ -109,6 +110,7 @@ describe("integration: socket → protocol → handler → pi", () => {
 				file: "/home/user/src/utils.ts",
 				cwd: "/home/user",
 				mode: "visual",
+				buffer_state: "saved",
 			},
 		}) + "\n";
 		await send(sock, msg);

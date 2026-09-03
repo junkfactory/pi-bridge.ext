@@ -16,6 +16,7 @@ function makePrompt(overrides?: Partial<PromptMessage>): PromptMessage {
 			file: "/home/user/src/main.ts",
 			cwd: "/home/user",
 			mode: "normal",
+			buffer_state: "saved",
 		},
 		...overrides,
 	};
@@ -57,7 +58,7 @@ describe("handleMessage", () => {
 			pi,
 			makePrompt({
 				text: "hello",
-				context: { file: "/f.ts", cwd: "/c", mode: "normal", filetype: "ts" },
+				context: { file: "/f.ts", cwd: "/c", mode: "normal", filetype: "ts", buffer_state: "saved" },
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
@@ -72,12 +73,124 @@ describe("handleMessage", () => {
 			pi,
 			makePrompt({
 				text: "explain",
-				context: { file: "/home/user/src/utils.ts", cwd: "/c", mode: "visual" },
+				context: { file: "/home/user/src/utils.ts", cwd: "/c", mode: "visual", buffer_state: "saved" },
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 		expect(pi.sendUserMessage).toHaveBeenCalledWith(
 			"File: [utils.ts](/home/user/src/utils.ts)\n\nexplain",
 		);
+	});
+
+	it("shows scratch hint when buffer_state is scratch", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				context: {
+					file: "/tmp/scratch-123.lua",
+					cwd: "/c",
+					mode: "normal",
+					buffer_state: "scratch",
+				},
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		const sent = pi.sendUserMessage.mock.calls[0][0] as string;
+		expect(sent).toContain("ephemeral scratch copy");
+		expect(sent).toContain("fix this");
+		expect(sent).not.toContain("File:");
+	});
+
+	it("shows modified hint when buffer_state is modified", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				context: {
+					file: "/home/user/src/main.ts",
+					cwd: "/c",
+					mode: "normal",
+					buffer_state: "modified",
+				},
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		const sent = pi.sendUserMessage.mock.calls[0][0] as string;
+		expect(sent).toContain("unsaved changes");
+		expect(sent).toContain("fix this");
+	});
+
+	it("shows unsaved hint when buffer_state is unsaved", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				context: {
+					file: "/home/user/src/main.ts",
+					cwd: "/c",
+					mode: "normal",
+					buffer_state: "unsaved",
+				},
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		const sent = pi.sendUserMessage.mock.calls[0][0] as string;
+		expect(sent).toContain("unsaved in Neovim");
+		expect(sent).toContain("fix this");
+	});
+
+	it("shows unsaved hint when buffer_state is nameless", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				context: {
+					file: "",
+					cwd: "/c",
+					mode: "normal",
+					buffer_state: "nameless",
+				},
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		const sent = pi.sendUserMessage.mock.calls[0][0] as string;
+		expect(sent).toContain("unsaved in Neovim");
+	});
+
+	it("shows file link when buffer_state is saved", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				context: {
+					file: "/home/user/src/main.ts",
+					cwd: "/c",
+					mode: "normal",
+					buffer_state: "saved",
+				},
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"File: [main.ts](/home/user/src/main.ts)\n\nfix this",
+		);
+	});
+
+	it("falls back to existsSync when buffer_state is absent", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				context: {
+					file: "/tmp/definitely-does-not-exist-xyz.ts",
+					cwd: "/c",
+					mode: "normal",
+				},
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		const sent = pi.sendUserMessage.mock.calls[0][0] as string;
+		expect(sent).toContain("does not exist on disk");
 	});
 });

@@ -117,6 +117,48 @@ describe("parseMessage", () => {
 			expect(msg.context.filetype).toBeUndefined();
 		}
 	});
+
+	it("parses prompt with buffer_state", () => {
+		const msg = parseMessage(
+			JSON.stringify({
+				type: "prompt",
+				text: "hi",
+				context: { file: "/f", cwd: "/c", mode: "normal", buffer_state: "scratch" },
+			}),
+		);
+		expect(msg).not.toBeNull();
+		if (msg?.type === "prompt") {
+			expect(msg.context.buffer_state).toBe("scratch");
+		}
+	});
+
+	it("drops invalid buffer_state values", () => {
+		const msg = parseMessage(
+			JSON.stringify({
+				type: "prompt",
+				text: "hi",
+				context: { file: "/f", cwd: "/c", mode: "normal", buffer_state: "invalid" },
+			}),
+		);
+		expect(msg).not.toBeNull();
+		if (msg?.type === "prompt") {
+			expect(msg.context.buffer_state).toBeUndefined();
+		}
+	});
+
+	it("handles absent buffer_state (backward compat)", () => {
+		const msg = parseMessage(
+			JSON.stringify({
+				type: "prompt",
+				text: "hi",
+				context: { file: "/f", cwd: "/c", mode: "normal" },
+			}),
+		);
+		expect(msg).not.toBeNull();
+		if (msg?.type === "prompt") {
+			expect(msg.context.buffer_state).toBeUndefined();
+		}
+	});
 });
 
 // ---------------------------------------------------------------------------

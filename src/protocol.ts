@@ -21,6 +21,7 @@ export interface PromptMessage {
 		cwd: string;
 		mode: "normal" | "visual";
 		filetype?: string;
+		buffer_state?: "nameless" | "scratch" | "unsaved" | "modified" | "saved";
 	};
 }
 
@@ -109,6 +110,21 @@ function parsePromptMessage(obj: Record<string, unknown>): PromptMessage | null 
 	};
 
 	if (typeof ctx.filetype === "string") context.filetype = ctx.filetype;
+
+	const VALID_BUFFER_STATES = new Set([
+		"nameless",
+		"scratch",
+		"unsaved",
+		"modified",
+		"saved",
+	] as const);
+	type BufferState = (typeof VALID_BUFFER_STATES extends Set<infer T> ? T : never);
+	if (typeof ctx.buffer_state === "string") {
+		const state = ctx.buffer_state as BufferState;
+		if (VALID_BUFFER_STATES.has(state)) {
+			context.buffer_state = state;
+		}
+	}
 
 	return { type: "prompt", text: obj.text, context };
 }
