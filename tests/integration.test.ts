@@ -150,8 +150,16 @@ function createMockPi(): ExtensionAPI & { handlers: Record<string, Function> } {
 	} as any;
 }
 
+function makeMockCtx(overrides: Record<string, any> = {}) {
+	return {
+		cwd: "/project",
+		getContextUsage: () => undefined,
+		...overrides,
+	} as any;
+}
+
 describe("integration: agent_start and agent_end hooks", () => {
-	it("agent_start broadcasts to connected clients", async () => {
+	it("agent_start broadcasts model + thinking level + brain use", async () => {
 		await start(sockPath, () => {});
 
 		const mockPi = createMockPi();
@@ -161,16 +169,24 @@ describe("integration: agent_start and agent_end hooks", () => {
 		const received: string[] = [];
 		sock.on("data", (chunk) => received.push(chunk.toString()));
 
-		// Simulate pi firing agent_start
-		mockPi.handlers["agent_start"]({}, { cwd: "/project" });
+		const ctx = makeMockCtx({
+			model: { id: "claude-opus-4", name: "Claude Opus 4" },
+			thinkingLevel: "medium",
+			getContextUsage: () => ({ tokens: 50000, contextWindow: 200000, percent: 25 }),
+		});
+
+		mockPi.handlers["agent_start"]({}, ctx);
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
-		expect(msg).toEqual({ type: "agent_start", message: "working..." });
+		expect(msg).toEqual({
+			type: "agent_start",
+			message: "Claude Opus 4 is thinking in medium at 25% brain use",
+		});
 		sock.destroy();
 	});
 
-	it("agent_end broadcasts to connected clients", async () => {
+	it("agent_start omits thinking level and brain use when unavailable", async () => {
 		await start(sockPath, () => {});
 
 		const mockPi = createMockPi();
@@ -180,12 +196,245 @@ describe("integration: agent_start and agent_end hooks", () => {
 		const received: string[] = [];
 		sock.on("data", (chunk) => received.push(chunk.toString()));
 
-		// Simulate pi firing agent_end
-		mockPi.handlers["agent_end"]({}, { cwd: "/project" });
+		const ctx = makeMockCtx({ model: { id: "gpt-5", name: "GPT-5" } });
+
+		mockPi.handlers["agent_start"]({}, ctx);
+
+		await waitFor(() => received.length === 1);
+		const msg = JSON.parse(received[0].trim());
+		expect(msg).toEqual({ type: "agent_start", message: "GPT-5 is thinking" });
+		sock.destroy();
+	});
+
+	it("agent_start falls back to model id when name is missing", async () => {
+		await start(sockPath, () => {});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+
+		const sock = await connect();
+		const received: string[] = [];
+		sock.on("data", (chunk) => received.push(chunk.toString()));
+
+		const ctx = makeMockCtx({ model: { id: "claude-haiku" } });
+
+		mockPi.handlers["agent_start"]({}, ctx);
+
+		await waitFor(() => received.length === 1);
+		const msg = JSON.parse(received[0].trim());
+		expect(msg).toEqual({ type: "agent_start", message: "claude-haiku is thinking" });
+		sock.destroy();
+	});
+
+	it("agent_start falls back to 'agent' when model is undefined", async () => {
+		await start(sockPath, () => {});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+
+		const sock = await connect();
+		const received: string[] = [];
+		sock.on("data", (chunk) => received.push(chunk.toString()));
+
+		mockPi.handlers["agent_start"]({}, makeMockCtx());
+
+		await waitFor(() => received.length === 1);
+		const msg = JSON.parse(received[0].trim());
+		expect(msg).toEqual({ type: "agent_start", message: "agent is thinking" });
+		sock.destroy();
+	});
+
+	it("agent_end broadcasts plain 'done' for empty messages", async () => {
+		await start(sockPath, () => {});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+
+		const sock = await connect();
+		const received: string[] = [];
+		sock.on("data", (chunk) => received.push(chunk.toString()));
+
+		mockPi.handlers["agent_end"]({ messages: [] }, makeMockCtx());
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
 		expect(msg).toEqual({ type: "agent_end", message: "done" });
+		sock.destroy();
+	});
+
+	it("agent_end summarizes turns, tools, and files from messages", async () => {
+		await start(sockPath, () => {});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+
+		const sock = await connect();
+		const received: string[] = [];
+		sock.on("data", (chunk) => received.push(chunk.toString()));
+
+		const event = {
+			type: "agent_end" as const,
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "1",
+							name: "read",
+							arguments: { path: "/project/src/a.ts" },
+						},
+						{
+							type: "toolCall",
+							id: "2",
+							name: "edit",
+							arguments: { path: "/project/src/a.ts" },
+						},
+						{
+							type: "toolCall",
+							id: "3",
+							name: "grep",
+							arguments: { pattern: "foo" },
+						},
+					],
+				},
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "4",
+							name: "write",
+							arguments: { path: "/project/src/b.ts" },
+						},
+					],
+				},
+			],
+		};
+
+		mockPi.handlers["agent_end"](event, makeMockCtx());
+
+		await waitFor(() => received.length === 1);
+		const msg = JSON.parse(received[0].trim());
+		expect(msg).toEqual({
+			type: "agent_end",
+			message: "done — 2 turns · used 4 tools · touched 2 files",
+		});
+		sock.destroy();
+	});
+
+	it("agent_end singularizes counts when value is 1", async () => {
+		await start(sockPath, () => {});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+
+		const sock = await connect();
+		const received: string[] = [];
+		sock.on("data", (chunk) => received.push(chunk.toString()));
+
+		const event = {
+			type: "agent_end" as const,
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "1",
+							name: "read",
+							arguments: { path: "/project/src/only.ts" },
+						},
+					],
+				},
+			],
+		};
+
+		mockPi.handlers["agent_end"](event, makeMockCtx());
+
+		await waitFor(() => received.length === 1);
+		const msg = JSON.parse(received[0].trim());
+		expect(msg).toEqual({
+			type: "agent_end",
+			message: "done — 1 turn · used 1 tool · touched 1 file",
+		});
+		sock.destroy();
+	});
+
+	it("agent_end appends '/ error' when a tool result is an error", async () => {
+		await start(sockPath, () => {});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+
+		const sock = await connect();
+		const received: string[] = [];
+		sock.on("data", (chunk) => received.push(chunk.toString()));
+
+		const event = {
+			type: "agent_end" as const,
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "1",
+					toolName: "bash",
+					content: [{ type: "text", text: "boom" }],
+					isError: true,
+					timestamp: 0,
+				},
+			],
+		};
+
+		mockPi.handlers["agent_end"](event, makeMockCtx());
+
+		await waitFor(() => received.length === 1);
+		const msg = JSON.parse(received[0].trim());
+		expect(msg.message).toBe("done / error");
+		expect(msg.message.startsWith("done / error")).toBe(true);
+		sock.destroy();
+	});
+
+	it("agent_end appends '/ error' when assistant stopReason is error", async () => {
+		await start(sockPath, () => {});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+
+		const sock = await connect();
+		const received: string[] = [];
+		sock.on("data", (chunk) => received.push(chunk.toString()));
+
+		const event = {
+			type: "agent_end" as const,
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "..." }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-opus-4",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "error",
+					timestamp: 0,
+				},
+			],
+		};
+
+		mockPi.handlers["agent_end"](event, makeMockCtx());
+
+		await waitFor(() => received.length === 1);
+		const msg = JSON.parse(received[0].trim());
+		expect(msg).toEqual({
+			type: "agent_end",
+			message: "done — 1 turn / error",
+		});
 		sock.destroy();
 	});
 
@@ -199,15 +448,17 @@ describe("integration: agent_start and agent_end hooks", () => {
 		const received: string[] = [];
 		sock.on("data", (chunk) => received.push(chunk.toString()));
 
-		mockPi.handlers["agent_start"]({}, { cwd: "/project" });
+		const ctx = makeMockCtx({ model: { id: "claude-opus-4", name: "Claude Opus 4" } });
+
+		mockPi.handlers["agent_start"]({}, ctx);
 		await waitFor(() => received.length === 1);
 
-		mockPi.handlers["agent_end"]({}, { cwd: "/project" });
+		mockPi.handlers["agent_end"]({ messages: [] }, ctx);
 		await waitFor(() => received.length === 2);
 
 		const startMsg = JSON.parse(received[0].trim());
 		const endMsg = JSON.parse(received[1].trim());
-		expect(startMsg).toEqual({ type: "agent_start", message: "working..." });
+		expect(startMsg).toEqual({ type: "agent_start", message: "Claude Opus 4 is thinking" });
 		expect(endMsg).toEqual({ type: "agent_end", message: "done" });
 		sock.destroy();
 	});

@@ -6,7 +6,8 @@
  * pi-bridge.nvim, and injects them into the pi session.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { basename } from "node:path";
 import { socketPath, ensureSocketDir } from "./path.js";
 import { broadcast, start, stop } from "./socket.js";
 import { parseMessage, serializeEvent } from "./protocol.js";
@@ -14,6 +15,64 @@ import type { OutboundEvent } from "./protocol.js";
 import { handleMessage } from "./handler.js";
 import { setLogLevel, info, warn, error, LOG_PATH } from "./log.js";
 import type { LogLevel } from "./log.js";
+
+function buildStartMessage(ctx: ExtensionContext): string {
+	const model = ctx.model?.name ?? ctx.model?.id ?? "agent";
+	const level = ctx.thinkingLevel;
+	const usage = ctx.getContextUsage();
+	const brain = usage?.percent != null && usage.percent > 0 ? usage.percent : null;
+
+	let msg = model;
+	msg += level ? ` is thinking in ${level}` : " is thinking";
+	if (brain != null) msg += ` at ${brain}% brain use`;
+	return msg;
+}
+
+function buildEndMessage(event: AgentEndEvent): string {
+	const messages = event.messages ?? [];
+
+	// Count turns (assistant messages)
+	const turns = messages.filter((m) => m.role === "assistant").length;
+
+	// Collect unique tool names from tool_use blocks
+	const toolNames = new Set<string>();
+	// Collect unique file paths from tool arguments
+	const files = new Set<string>();
+
+	for (const msg of messages) {
+		if (msg.role === "assistant") {
+			for (const block of msg.content) {
+				if (block.type === "toolCall") {
+					toolNames.add(block.name);
+					// Extract file paths from common tool args
+					const path = block.arguments?.path ?? block.arguments?.file;
+					if (typeof path === "string") {
+						files.add(basename(path));
+					}
+				}
+			}
+		}
+	}
+
+	const parts: string[] = [];
+	if (turns > 0) parts.push(`${turns} turn${turns !== 1 ? "s" : ""}`);
+	if (toolNames.size > 0) {
+		parts.push(`used ${toolNames.size} tool${toolNames.size !== 1 ? "s" : ""}`);
+	}
+	if (files.size > 0) {
+		parts.push(`touched ${files.size} file${files.size !== 1 ? "s" : ""}`);
+	}
+
+	// Check for errors
+	const hasError =
+		messages.some((m) => m.role === "toolResult" && m.isError) ||
+		messages.some((m) => m.role === "assistant" && m.stopReason === "error");
+
+	let result = "done";
+	if (parts.length > 0) result += " — " + parts.join(" · ");
+	if (hasError) result += " / error";
+	return result;
+}
 
 export default function (pi: ExtensionAPI) {
 	// Configure log level from env (default: info)
@@ -49,14 +108,14 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_start", (_event, ctx) => {
 		const cwd = ctx.cwd ?? process.cwd();
-		const event: OutboundEvent = { type: "agent_start", message: "working..." };
+		const event: OutboundEvent = { type: "agent_start", message: buildStartMessage(ctx) };
 		info("Agent started", { cwd });
 		broadcast(serializeEvent(event));
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
 		const cwd = ctx.cwd ?? process.cwd();
-		const event: OutboundEvent = { type: "agent_end", message: "done" };
+		const event: OutboundEvent = { type: "agent_end", message: buildEndMessage(_event) };
 		info("Agent completed", { cwd });
 		broadcast(serializeEvent(event));
 	});
