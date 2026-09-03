@@ -16,14 +16,14 @@ import { handleMessage } from "./handler.js";
 import { setLogLevel, info, warn, error, LOG_PATH } from "./log.js";
 import type { LogLevel } from "./log.js";
 
-function buildStartMessage(ctx: ExtensionContext): string {
+export function buildStartMessage(ctx: ExtensionContext): string {
 	const model = ctx.model?.name ?? ctx.model?.id ?? "agent";
 	const level = ctx.thinkingLevel;
 	const usage = ctx.getContextUsage();
 	const brain = usage?.percent != null && usage.percent > 0 ? usage.percent : null;
 
 	let msg = model;
-	msg += level ? ` is thinking in ${level}` : " is thinking";
+	msg += level && level !== "off" ? ` is thinking in ${level}` : " is thinking";
 	if (brain != null) msg += ` at ${brain}% brain use`;
 	return msg;
 }
