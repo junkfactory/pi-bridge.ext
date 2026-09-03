@@ -22,43 +22,62 @@ function makePrompt(overrides?: Partial<PromptMessage>): PromptMessage {
 }
 
 describe("handleMessage", () => {
-	it("sends raw text to sendUserMessage", () => {
+	it("prepends file link when context.file is absolute", () => {
 		const pi = mockPi();
 		handleMessage(pi, makePrompt());
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"File: [main.ts](/home/user/src/main.ts)\n\nfix this",
+		);
+	});
+
+	it("sends only the text when file is empty", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({ context: { file: "", cwd: "/c", mode: "normal" } }),
+		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix this");
 	});
 
-	it("sends only the text, ignoring context", () => {
+	it("sends only the text when file is relative", () => {
 		const pi = mockPi();
-		handleMessage(pi, makePrompt({ text: "hello" }));
+		handleMessage(
+			pi,
+			makePrompt({ context: { file: "src/main.ts", cwd: "/c", mode: "normal" } }),
+		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("hello");
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix this");
 	});
 
-	it("does not include filetype in message", () => {
+	it("includes file link with filetype present", () => {
 		const pi = mockPi();
 		handleMessage(
 			pi,
 			makePrompt({
 				text: "hello",
-				context: { file: "/f", cwd: "/c", mode: "normal", filetype: "ts" },
+				context: { file: "/f.ts", cwd: "/c", mode: "normal", filetype: "ts" },
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("hello");
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"File: [f.ts](/f.ts)\n\nhello",
+		);
 	});
 
-	it("does not include mode in message", () => {
+	it("includes file link in visual mode", () => {
 		const pi = mockPi();
 		handleMessage(
 			pi,
 			makePrompt({
 				text: "explain",
-				context: { file: "/f", cwd: "/c", mode: "visual" },
+				context: { file: "/home/user/src/utils.ts", cwd: "/c", mode: "visual" },
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("explain");
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"File: [utils.ts](/home/user/src/utils.ts)\n\nexplain",
+		);
 	});
 });

@@ -88,7 +88,9 @@ describe("integration: socket → protocol → handler → pi", () => {
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 
 		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toBe("add error handling");
+		expect(call).toBe(
+			"File: [main.ts](/home/user/src/main.ts)\n\nadd error handling",
+		);
 	});
 
 	it("delivers visual mode context", async () => {
@@ -114,7 +116,9 @@ describe("integration: socket → protocol → handler → pi", () => {
 
 		await waitFor(() => pi.sendUserMessage.mock.calls.length === 1);
 		const call = pi.sendUserMessage.mock.calls[0][0] as string;
-		expect(call).toBe("explain this");
+		expect(call).toBe(
+			"File: [utils.ts](/home/user/src/utils.ts)\n\nexplain this",
+		);
 	});
 
 	it("drops invalid messages silently", async () => {
