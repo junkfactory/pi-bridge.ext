@@ -12,18 +12,21 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-if ! jj bookmark list main | grep -q '^main:'; then
+BOOKMARKS="$(jj bookmark list main)"
+if [[ "$BOOKMARKS" != main:* ]]; then
   echo "Local main bookmark not found. Aborting." >&2
   exit 1
 fi
 
-if ! jj status | grep -q 'Working copy clean'; then
+STATUS="$(jj status)"
+if [[ "$STATUS" != *"Working copy clean"* ]]; then
   echo "Working copy not clean. Aborting." >&2
   exit 1
 fi
 
 TAG="v$VERSION"
-if jj tag list | grep -qE "(^|[[:space:]])${TAG}([[:space:]]|$)"; then
+TAGS="$(jj tag list)"
+if [[ "$TAGS" =~ (^|[[:space:]])${TAG}([[:space:]]|$) ]]; then
   echo "Tag $TAG already exists. Aborting." >&2
   exit 1
 fi
