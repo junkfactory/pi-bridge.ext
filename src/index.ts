@@ -24,7 +24,7 @@ export function buildStartMessage(ctx: ExtensionContext): string {
 
 	let msg = model;
 	msg += level && level !== "off" ? ` is thinking in ${level}` : " is thinking";
-	if (brain != null) msg += ` at ${brain}% brain use`;
+	if (brain != null) msg += ` at ${brain.toFixed(2)}% brain usage`;
 	return msg;
 }
 
@@ -63,14 +63,16 @@ function buildEndMessage(event: AgentEndEvent): string {
 		parts.push(`touched ${files.size} file${files.size !== 1 ? "s" : ""}`);
 	}
 
-	// Check for errors
-	const hasError =
-		messages.some((m) => m.role === "toolResult" && m.isError) ||
-		messages.some((m) => m.role === "assistant" && m.stopReason === "error");
+	const errorMessage = messages
+		.filter((m) => (m.role === "toolResult" && m.isError) || (m.role === "assistant" && m.stopReason === "error"))
+		.flatMap((m) =>
+			(m as any).content?.filter((part: any) => part.type === "text").map((part: any) => part.text) ?? [],
+		)
+		.find((text) => text?.trim());
 
 	let result = "done";
 	if (parts.length > 0) result += " — " + parts.join(" · ");
-	if (hasError) result += " / error";
+	if (errorMessage) result += ` / ${errorMessage}`;
 	return result;
 }
 

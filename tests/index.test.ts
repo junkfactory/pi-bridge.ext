@@ -14,7 +14,12 @@ function mockCtx(overrides?: Partial<ExtensionContext>): ExtensionContext {
 describe("buildStartMessage", () => {
 	it("includes model name and thinking level", () => {
 		const msg = buildStartMessage(mockCtx());
-		expect(msg).toBe("Claude is thinking in medium at 50% brain use");
+		expect(msg).toBe("Claude is thinking in medium at 50.00% brain usage");
+	});
+
+	it("rounds brain usage to two decimal places", () => {
+		const msg = buildStartMessage(mockCtx({ getContextUsage: () => ({ percent: 12.3456 }) }));
+		expect(msg).toContain("at 12.35% brain usage");
 	});
 
 	it("falls back to model id when name is missing", () => {
@@ -29,12 +34,12 @@ describe("buildStartMessage", () => {
 
 	it("omits thinking level when undefined", () => {
 		const msg = buildStartMessage(mockCtx({ thinkingLevel: undefined } as any));
-		expect(msg).toBe("Claude is thinking at 50% brain use");
+		expect(msg).toBe("Claude is thinking at 50.00% brain usage");
 	});
 
 	it("treats 'off' thinking level as no thinking level", () => {
 		const msg = buildStartMessage(mockCtx({ thinkingLevel: "off" }));
-		expect(msg).toBe("Claude is thinking at 50% brain use");
+		expect(msg).toBe("Claude is thinking at 50.00% brain usage");
 		expect(msg).not.toContain("in off");
 	});
 
@@ -47,16 +52,16 @@ describe("buildStartMessage", () => {
 
 	it("omits brain usage when percent is null", () => {
 		const msg = buildStartMessage(mockCtx({ getContextUsage: () => ({ percent: null }) } as any));
-		expect(msg).not.toContain("brain use");
+		expect(msg).not.toContain("brain usage");
 	});
 
 	it("omits brain usage when percent is 0", () => {
 		const msg = buildStartMessage(mockCtx({ getContextUsage: () => ({ percent: 0 }) }));
-		expect(msg).not.toContain("brain use");
+		expect(msg).not.toContain("brain usage");
 	});
 
 	it("omits brain usage when getContextUsage returns undefined", () => {
 		const msg = buildStartMessage(mockCtx({ getContextUsage: () => undefined }));
-		expect(msg).not.toContain("brain use");
+		expect(msg).not.toContain("brain usage");
 	});
 });

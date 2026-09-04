@@ -165,7 +165,7 @@ function makeMockCtx(overrides: Record<string, any> = {}) {
 }
 
 describe("integration: agent_start and agent_end hooks", () => {
-	it("agent_start broadcasts model + thinking level + brain use", async () => {
+	it("agent_start broadcasts model + thinking level + brain usage", async () => {
 		await start(sockPath, () => {});
 
 		const mockPi = createMockPi();
@@ -187,12 +187,12 @@ describe("integration: agent_start and agent_end hooks", () => {
 		const msg = JSON.parse(received[0].trim());
 		expect(msg).toEqual({
 			type: "agent_start",
-			message: "Claude Opus 4 is thinking in medium at 25% brain use",
+			message: "Claude Opus 4 is thinking in medium at 25.00% brain usage",
 		});
 		sock.destroy();
 	});
 
-	it("agent_start omits thinking level and brain use when unavailable", async () => {
+	it("agent_start omits thinking level and brain usage when unavailable", async () => {
 		await start(sockPath, () => {});
 
 		const mockPi = createMockPi();
@@ -367,7 +367,7 @@ describe("integration: agent_start and agent_end hooks", () => {
 		sock.destroy();
 	});
 
-	it("agent_end appends '/ error' when a tool result is an error", async () => {
+	it("agent_end includes the tool error message", async () => {
 		await start(sockPath, () => {});
 
 		const mockPi = createMockPi();
@@ -395,12 +395,11 @@ describe("integration: agent_start and agent_end hooks", () => {
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
-		expect(msg.message).toBe("done / error");
-		expect(msg.message.startsWith("done / error")).toBe(true);
+		expect(msg.message).toBe("done / boom");
 		sock.destroy();
 	});
 
-	it("agent_end appends '/ error' when assistant stopReason is error", async () => {
+	it("agent_end includes the assistant error message", async () => {
 		await start(sockPath, () => {});
 
 		const mockPi = createMockPi();
@@ -415,7 +414,7 @@ describe("integration: agent_start and agent_end hooks", () => {
 			messages: [
 				{
 					role: "assistant",
-					content: [{ type: "text", text: "..." }],
+					content: [{ type: "text", text: "provider failed" }],
 					api: "anthropic-messages",
 					provider: "anthropic",
 					model: "claude-opus-4",
@@ -439,7 +438,7 @@ describe("integration: agent_start and agent_end hooks", () => {
 		const msg = JSON.parse(received[0].trim());
 		expect(msg).toEqual({
 			type: "agent_end",
-			message: "done — 1 turn / error",
+			message: "done — 1 turn / provider failed",
 		});
 		sock.destroy();
 	});
