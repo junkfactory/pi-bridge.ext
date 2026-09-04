@@ -1,9 +1,35 @@
-import { describe, expect, it, afterEach, beforeEach } from "vitest";
+import { describe, expect, it, afterEach, beforeEach, vi } from "vitest";
 import { start, stop, broadcast } from "../src/socket.js";
-import { createConnection } from "node:net";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { info, warn } from "../src/log.js";
+import { createConnection, createServer } from "node:net";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+vi.mock("../src/log.js", () => ({
+	LOG_PATH: "/tmp/pi-bridge-test.log",
+	setLogLevel: vi.fn(),
+	trace: vi.fn(),
+	debug: vi.fn(),
+	info: vi.fn(),
+	warn: vi.fn(),
+	error: vi.fn(),
+}));
+
+vi.mock("node:net", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:net")>();
+	return {
+		...actual,
+		createConnection: (...args: any[]) => {
+			if ((globalThis as any).__probeHangs) {
+				// Real socket that never connects and never errors — simulates a
+				// half-dead listener so the probe timeout path is exercised.
+				return new actual.Socket();
+			}
+			return actual.createConnection(...(args as Parameters<typeof actual.createConnection>));
+		},
+	};
+});
 
 let tmpDir: string;
 let sockPath: string;
@@ -60,17 +86,29 @@ function waitFor(
 describe("socket lifecycle", () => {
 	it("starts and stops cleanly", async () => {
 		const started = await start(sockPath, () => {});
-		expect(started).toBe(true);
+		expect(started).toEqual({ status: "started" });
 		expect(existsSync(sockPath)).toBe(true);
 
 		await stop();
 		expect(existsSync(sockPath)).toBe(false);
 	});
 
-	it("returns false if already running", async () => {
+	it("logs lifecycle events with the process pid", async () => {
+		await start(sockPath, () => {});
+		expect(info).toHaveBeenCalledWith("Socket server started", { path: sockPath, pid: process.pid });
+
+		await stop();
+		expect(info).toHaveBeenCalledWith("Socket server stopped", { path: sockPath, pid: process.pid });
+	});
+
+	it("returns already-hosted if already running", async () => {
 		await start(sockPath, () => {});
 		const second = await start(sockPath, () => {});
-		expect(second).toBe(false);
+		expect(second).toEqual({ status: "already-hosted" });
+		expect(info).toHaveBeenCalledWith("Socket server already running", {
+			path: sockPath,
+			pid: process.pid,
+		});
 	});
 
 	it("handles stale socket (ECONNREFUSED)", async () => {
@@ -78,7 +116,7 @@ describe("socket lifecycle", () => {
 		writeFileSync(sockPath, "");
 
 		const started = await start(sockPath, () => {});
-		expect(started).toBe(true);
+		expect(started).toEqual({ status: "started" });
 		expect(existsSync(sockPath)).toBe(true);
 	});
 
@@ -230,6 +268,65 @@ describe("broadcast", () => {
 	});
 });
 
+describe("probe timeout", () => {
+	beforeEach(() => {
+		(globalThis as any).__probeHangs = false;
+	});
+
+	afterEach(() => {
+		(globalThis as any).__probeHangs = false;
+	});
+
+	it("resolves false when the probe exceeds 500ms", async () => {
+		// Regular file at the socket path + a hanging probe connection.
+		writeFileSync(sockPath, "");
+
+		(globalThis as any).__probeHangs = true;
+		const t0 = Date.now();
+		try {
+			// Probe timeout resolves false → socket treated as stale → rebound.
+			const result = await start(sockPath, () => {});
+			const elapsed = Date.now() - t0;
+			expect(result).toEqual({ status: "started" });
+			expect(existsSync(sockPath)).toBe(true);
+			// Must have waited for the 500ms timeout, not failed fast.
+			expect(elapsed).toBeGreaterThanOrEqual(450);
+			expect(elapsed).toBeLessThan(1500);
+		} finally {
+			(globalThis as any).__probeHangs = false;
+		}
+	});
+
+	it("still detects a stale socket via ECONNREFUSED", async () => {
+		writeFileSync(sockPath, "");
+
+		const result = await start(sockPath, () => {});
+		expect(result).toEqual({ status: "started" });
+	});
+});
+
+describe("shared state across module reloads", () => {
+	it("fresh module evaluation adopts the live singleton server", async () => {
+		const first = await start(sockPath, () => {});
+		expect(first).toEqual({ status: "started" });
+
+		// Re-evaluate the module; it must see the same live server.
+		vi.resetModules();
+		const fresh = await import("../src/socket.js");
+
+		const second = await fresh.start(sockPath, () => {});
+		expect(second).toEqual({ status: "already-hosted" } as any);
+
+		// The singleton server still serves connections.
+		const sock = await connect();
+		sock.destroy();
+
+		// A stop through the fresh module tears the shared server down.
+		await fresh.stop();
+		expect(existsSync(sockPath)).toBe(false);
+	});
+});
+
 describe("shutdown with active clients", () => {
 	it("stops within the deadline when a client is still connected", async () => {
 		await start(sockPath, () => {});
@@ -295,7 +392,7 @@ describe("shutdown with active clients", () => {
 
 		// A subsequent start() must succeed (state fully reset).
 		const restarted = await start(sockPath, () => {});
-		expect(restarted).toBe(true);
+		expect(restarted).toEqual({ status: "started" });
 	});
 
 	it("stop() with no clients still removes the socket file", async () => {
@@ -304,5 +401,44 @@ describe("shutdown with active clients", () => {
 
 		await stop();
 		expect(existsSync(sockPath)).toBe(false);
+	});
+
+	it("leaves the socket file in place when the inode no longer matches", async () => {
+		await start(sockPath, () => {}); // server A binds the file
+		const inodeA = statSync(sockPath).ino;
+
+		// Simulate a newer session taking over the path: rebind a new server B.
+		// Burn the freed inode first — APFS reuses it immediately, which would
+		// give B's file the same inode as A's and make the test meaningless.
+		const filler = join(tmpDir, "filler");
+		writeFileSync(filler, "");
+		unlinkSync(sockPath);
+
+		const serverB = createServer(() => {});
+		await new Promise<void>((resolve) => serverB.listen(sockPath, resolve));
+		try {
+			const inodeB = statSync(sockPath).ino;
+			expect(inodeB).not.toBe(inodeA);
+
+			await stop(); // server A shuts down — must NOT unlink B's file
+
+			expect(existsSync(sockPath)).toBe(true);
+			expect(info).toHaveBeenCalledWith(
+				"Socket file owned by newer session; leaving in place",
+				{ path: sockPath, pid: process.pid },
+			);
+
+			// B still serves connections.
+			const sock = await connect();
+			sock.destroy();
+		} finally {
+			await new Promise<void>((resolve) => serverB.close(() => resolve()));
+			try {
+				unlinkSync(sockPath);
+				rmSync(filler, { force: true });
+			} catch {
+				// leftover from a failure above
+			}
+		}
 	});
 });

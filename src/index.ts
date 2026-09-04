@@ -81,7 +81,7 @@ export default function (pi: ExtensionAPI) {
 	const level = (process.env.PI_BRIDGE_LOG_LEVEL ?? "info") as LogLevel;
 	setLogLevel(level);
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		const cwd = ctx.cwd ?? process.cwd();
 		const path = socketPath(cwd);
 
@@ -89,7 +89,7 @@ export default function (pi: ExtensionAPI) {
 		ensureSocketDir();
 
 		try {
-			const started = await start(path, (raw) => {
+			const result = await start(path, (raw) => {
 				const message = parseMessage(raw);
 				if (!message) {
 					warn("Received invalid message", { raw });
@@ -98,10 +98,22 @@ export default function (pi: ExtensionAPI) {
 				handleMessage(pi, message);
 			});
 
-			if (started) {
-				info("pi-bridge ready", { socketPath: path });
-			} else {
-				info("pi-bridge socket already in use", { socketPath: path });
+			switch (result.status) {
+				case "started":
+					info("pi-bridge ready", { socketPath: path, pid: process.pid });
+					break;
+				case "already-hosted":
+					info("pi-bridge socket already hosted", { socketPath: path, pid: process.pid });
+					break;
+				case "foreign-owner":
+					warn("pi-bridge socket owned by another pi instance", { socketPath: path, pid: process.pid });
+					ctx.ui.notify(
+						"pi-bridge: another pi instance is running for this directory — pi-bridge not hosting this session",
+						"warning",
+					);
+					break;
+				case "skipped":
+					break;
 			}
 		} catch (err) {
 			error("Failed to start pi-bridge socket", { err: String(err) });
@@ -122,8 +134,14 @@ export default function (pi: ExtensionAPI) {
 		broadcast(serializeEvent(event));
 	});
 
-	pi.on("session_shutdown", async () => {
-		info("Shutting down pi-bridge extension");
+	pi.on("session_shutdown", async (event) => {
+		// Only a real quit tears the socket down. Session switches (new, resume,
+		// fork, reload) must keep the socket alive so nvim stays connected.
+		if (event.reason !== "quit") {
+			info("pi-bridge socket kept across session switch", { reason: event.reason, pid: process.pid });
+			return;
+		}
+		info("Shutting down pi-bridge extension", { pid: process.pid });
 		await stop();
 	});
 }

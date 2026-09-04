@@ -3,10 +3,14 @@
  *
  * Creates a Unix domain server, handles connections with newline-delimited
  * JSON framing, and cleans up stale sockets from previous sessions.
+ *
+ * All mutable server state lives in a `globalThis` singleton so that a jiti
+ * module re-evaluation (extension reload / session switch) adopts the live
+ * server instead of losing it.
  */
 
-import { createServer, type Server, type Socket } from "node:net";
-import { existsSync, unlinkSync, chmodSync } from "node:fs";
+import { createConnection, createServer, type Server, type Socket } from "node:net";
+import { existsSync, renameSync, unlinkSync, chmodSync, statSync } from "node:fs";
 import { frameBuffer } from "./protocol.js";
 import { debug, error, info, warn } from "./log.js";
 
@@ -16,46 +20,67 @@ const MAX_BUFFER_BYTES = 1 * 1024 * 1024;
 /** Defensive upper bound for server.close() to resolve during shutdown. */
 const SHUTDOWN_TIMEOUT_MS = 1000;
 
-/** Active server state, null when not running. */
-let server: Server | null = null;
-let socketPath: string | null = null;
+/** How long to wait for a probe connection before treating the socket as dead. */
+const PROBE_TIMEOUT_MS = 500;
 
-/** Active client sockets; destroyed on shutdown to let server.close() resolve. */
-const connections = new Set<Socket>();
+/** Result of start(): describes what happened on the ownership path. */
+export type StartResult =
+	| { status: "started" }
+	| { status: "already-hosted" }
+	| { status: "foreign-owner" }
+	| { status: "skipped" };
 
-/** True while stop() is in flight, so concurrent calls share the same promise. */
-let stopping: Promise<void> | null = null;
+/** Mutable socket server state, shared across module re-evaluations. */
+interface SocketState {
+	server: Server | null;
+	socketPath: string | null;
+	connections: Set<Socket>;
+	stopping: Promise<void> | null;
+	/** Inode of the socket file at bind time; null when unknown. */
+	bindInode: number | null;
+	signalsRegistered: boolean;
+}
 
-/** Signal handlers registered once. */
-let signalsRegistered = false;
+const globalScope = globalThis as typeof globalThis & {
+	__piBridgeSocket?: SocketState;
+};
+
+/** Shared singleton state (survives jiti module reloads within one process). */
+const state: SocketState = (globalScope.__piBridgeSocket ??= {
+	server: null,
+	socketPath: null,
+	connections: new Set<Socket>(),
+	stopping: null,
+	bindInode: null,
+	signalsRegistered: false,
+});
 
 /**
  * Start listening on the given socket path.
  *
  * Idempotent activation:
- * - If the socket file exists and a connection succeeds → server already
- *   running (noop, returns false).
+ * - If our singleton server is already running → already-hosted (noop).
+ * - If the socket file exists and a connection succeeds → another pi
+ *   instance owns it (foreign-owner).
  * - If the socket file exists but connection fails (ECONNREFUSED) → stale
  *   socket from a crashed session. Removes it and creates fresh.
  * - If no socket file → creates fresh.
- *
- * Returns true if a new server was started, false if already running.
  */
 export async function start(
 	path: string,
 	onMessage: (data: string) => void,
-): Promise<boolean> {
-	if (server) {
-		warn("Socket server already running", { path: socketPath });
-		return false;
+): Promise<StartResult> {
+	if (state.server) {
+		info("Socket server already running", { path: state.socketPath, pid: process.pid });
+		return { status: "already-hosted" };
 	}
 
 	// Check for existing socket
 	if (existsSync(path)) {
 		const alive = await probeExistingSocket(path);
 		if (alive) {
-			info("Socket already in use by another process", { path });
-			return false;
+			info("Socket already in use by another process", { path, pid: process.pid });
+			return { status: "foreign-owner" };
 		}
 		// Stale socket — remove it
 		warn("Removing stale socket", { path });
@@ -69,8 +94,8 @@ export async function start(
 
 	// Create and start the server
 	const srv = createServer((conn) => {
-		connections.add(conn);
-		conn.once("close", () => connections.delete(conn));
+		state.connections.add(conn);
+		conn.once("close", () => state.connections.delete(conn));
 		handleConnection(conn, onMessage);
 	});
 
@@ -88,12 +113,20 @@ export async function start(
 		});
 	});
 
-	server = srv;
-	socketPath = path;
-	info("Socket server started", { path });
+	state.server = srv;
+	state.socketPath = path;
+
+	// Record the socket file's inode so stop() only unlinks what it owns.
+	try {
+		state.bindInode = statSync(path).ino;
+	} catch {
+		state.bindInode = null;
+	}
+
+	info("Socket server started", { path, pid: process.pid });
 
 	registerSignalHandlers();
-	return true;
+	return { status: "started" };
 }
 
 /**
@@ -103,27 +136,50 @@ export async function start(
  * wait for them. A 1s defensive deadline resolves the wait even if a client
  * refuses to close, so Pi can always shut down deterministically.
  *
+ * The socket file is only unlinked if it is still the one this server bound
+ * (inode match); a rebound socket owned by a newer session is left in place.
+ *
  * Safe to call repeatedly or concurrently: concurrent calls await the
  * in-flight shutdown.
  */
 export async function stop(): Promise<void> {
-	if (!server) return;
-	if (stopping) return stopping;
+	if (!state.server) return;
+	if (state.stopping) return state.stopping;
 
-	const path = socketPath;
-	const srv = server;
+	const path = state.socketPath;
+	const srv = state.server;
+	const bindInode = state.bindInode;
 
-	stopping = (async () => {
+	state.stopping = (async () => {
 		// Destroy active clients so their close events fire and server.close()
 		// is not blocked by lingering connections.
-		for (const conn of connections) {
+		for (const conn of state.connections) {
 			try {
 				conn.destroy();
 			} catch {
 				// already closed/closing — ignore
 			}
 		}
-		connections.clear();
+		state.connections.clear();
+
+		// Node unlinks the listening path on server.close(). If the path has
+		// been rebound by a newer session, move it out of the way first and
+		// restore it after close, so a dying old instance cannot delete the
+		// new owner's socket file.
+		const foreignFile = path != null && existsSync(path) && !ownsPath(path, bindInode);
+		if (foreignFile) {
+			info("Socket file owned by newer session; leaving in place", { path, pid: process.pid });
+		}
+		let displaced: string | null = null;
+		if (foreignFile && path != null) {
+			displaced = `${path}.rebound-${process.pid}`;
+			try {
+				renameSync(path, displaced);
+			} catch (err) {
+				warn("Failed to move rebound socket aside", { path, err: String(err) });
+				displaced = null;
+			}
+		}
 
 		// Await close with a defensive deadline.
 		let deadlineFired = false;
@@ -147,8 +203,15 @@ export async function stop(): Promise<void> {
 			});
 		});
 
-		// Clean up socket file regardless of close outcome.
-		if (path && existsSync(path)) {
+		if (displaced) {
+			// Restore the newer session's socket file (rename preserves its inode).
+			try {
+				renameSync(displaced, path!);
+			} catch (err) {
+				warn("Failed to restore rebound socket file", { path, err: String(err) });
+			}
+		} else if (path && existsSync(path)) {
+			// close() normally unlinks our own file; clean up defensively.
 			try {
 				unlinkSync(path);
 			} catch (err) {
@@ -156,13 +219,14 @@ export async function stop(): Promise<void> {
 			}
 		}
 
-		info("Socket server stopped", { path });
-		server = null;
-		socketPath = null;
-		stopping = null;
+		info("Socket server stopped", { path, pid: process.pid });
+		state.server = null;
+		state.socketPath = null;
+		state.bindInode = null;
+		state.stopping = null;
 	})();
 
-	return stopping;
+	return state.stopping;
 }
 
 /**
@@ -172,8 +236,8 @@ export async function stop(): Promise<void> {
  * is not destroyed. Logs each broadcast at debug level.
  */
 export function broadcast(data: string): void {
-	debug("Broadcasting to connections", { count: connections.size, data: data.trim() });
-	for (const conn of connections) {
+	debug("Broadcasting to connections", { count: state.connections.size, data: data.trim() });
+	for (const conn of state.connections) {
 		if (!conn.destroyed) {
 			try {
 				conn.write(data);
@@ -189,21 +253,40 @@ export function broadcast(data: string): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * Whether the socket file at `path` is still the one this server bound.
+ * An unknown inode (null) falls back to "owned" — previous unlink behavior.
+ */
+function ownsPath(path: string, bindInode: number | null): boolean {
+	if (bindInode == null) return true;
+	try {
+		return statSync(path).ino === bindInode;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Probe whether an existing socket is alive by attempting a connection.
  * Returns true if the connection succeeds (server is alive), false if
- * ECONNREFUSED (stale socket).
+ * ECONNREFUSED (stale socket) or the probe times out (half-dead listener).
  */
 function probeExistingSocket(path: string): Promise<boolean> {
 	return new Promise((resolve) => {
-		const { createConnection } = require("node:net");
 		const sock: Socket = createConnection(path);
 
+		const timer = setTimeout(() => {
+			sock.destroy();
+			resolve(false);
+		}, PROBE_TIMEOUT_MS);
+
 		sock.once("connect", () => {
+			clearTimeout(timer);
 			sock.destroy();
 			resolve(true);
 		});
 
 		sock.once("error", () => {
+			clearTimeout(timer);
 			sock.destroy();
 			resolve(false);
 		});
@@ -256,8 +339,8 @@ function handleConnection(conn: Socket, onMessage: (data: string) => void): void
 
 /** Register SIGINT/SIGTERM handlers for graceful shutdown. */
 function registerSignalHandlers(): void {
-	if (signalsRegistered) return;
-	signalsRegistered = true;
+	if (state.signalsRegistered) return;
+	state.signalsRegistered = true;
 
 	const shutdown = async (signal: string) => {
 		info("Received signal, shutting down", { signal });
