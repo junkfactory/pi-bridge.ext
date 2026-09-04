@@ -19,7 +19,7 @@ if [[ "$BOOKMARKS" != main:* ]]; then
 fi
 
 STATUS="$(jj status)"
-if [[ "$STATUS" != *"Working copy clean"* ]]; then
+if [[ "$STATUS" != *"working copy has no changes"* ]]; then
   echo "Working copy not clean. Aborting." >&2
   exit 1
 fi
