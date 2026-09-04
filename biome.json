@@ -18,8 +18,7 @@
 			"linter": {
 				"rules": {
 					"suspicious": {
-						// test mocks and fixture casting legitimately use `any`
-						"noExplicitAny": "off"
+							"noExplicitAny": "off"
 					}
 				}
 			}
