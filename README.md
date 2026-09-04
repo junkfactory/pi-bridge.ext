@@ -148,12 +148,15 @@ The log file is append-only and not rotated automatically. To rotate manually:
 rm ~/.pi/agent/pi-bridge.log
 ```
 
-## Running Tests
+## Running Tests and Lint
 
 ```bash
 npm install         # install dependencies
 npx vitest run      # run all tests
+npx @biomejs/biome check .   # lint + format check (CI runs this too)
 ```
+
+CI fails on lint errors — run `npx @biomejs/biome check --write .` before committing.
 
 ## Related
 

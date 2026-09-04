@@ -1,15 +1,28 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.0.0/schema.json",
-  "files": {
-    "include": ["src", "tests"]
-  },
-  "formatter": {
-    "indentStyle": "tab",
-    "indentWidth": 2
-  },
-  "linter": {
-    "rules": {
-      "recommended": true
-    }
-  }
+	"$schema": "https://biomejs.dev/schemas/2.5.11/schema.json",
+	"files": {
+		"includes": ["**/src/**", "**/tests/**"]
+	},
+	"formatter": {
+		"indentStyle": "tab",
+		"indentWidth": 2
+	},
+	"linter": {
+		"rules": {
+			"preset": "recommended"
+		}
+	},
+	"overrides": [
+		{
+			"includes": ["**/tests/**/*.ts", "**/tests/**/*.tsx"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						// test mocks and fixture casting legitimately use `any`
+						"noExplicitAny": "off"
+					}
+				}
+			}
+		}
+	]
 }

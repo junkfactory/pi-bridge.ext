@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { OutboundEvent, PromptMessage } from "../src/protocol.js";
 import {
+	FRAME_DELIMITER,
 	frameBuffer,
 	parseMessage,
 	serializeEvent,
-	FRAME_DELIMITER,
 } from "../src/protocol.js";
-import type { OutboundEvent, PromptMessage } from "../src/protocol.js";
 
 // ---------------------------------------------------------------------------
 // parseMessage
@@ -29,7 +29,10 @@ describe("parseMessage", () => {
 
 	it("parses prompt with visual mode", () => {
 		const msg = parseMessage(
-			JSON.stringify({ ...validPrompt, context: { ...validPrompt.context, mode: "visual" } }),
+			JSON.stringify({
+				...validPrompt,
+				context: { ...validPrompt.context, mode: "visual" },
+			}),
 		);
 		expect(msg?.type).toBe("prompt");
 		if (msg?.type === "prompt") {
@@ -58,12 +61,16 @@ describe("parseMessage", () => {
 
 	it("returns null for prompt missing text", () => {
 		expect(
-			parseMessage(JSON.stringify({ type: "prompt", context: validPrompt.context })),
+			parseMessage(
+				JSON.stringify({ type: "prompt", context: validPrompt.context }),
+			),
 		).toBeNull();
 	});
 
 	it("returns null for prompt missing context", () => {
-		expect(parseMessage(JSON.stringify({ type: "prompt", text: "hi" }))).toBeNull();
+		expect(
+			parseMessage(JSON.stringify({ type: "prompt", text: "hi" })),
+		).toBeNull();
 	});
 
 	it("returns null for prompt with missing required context fields", () => {
@@ -73,7 +80,11 @@ describe("parseMessage", () => {
 			{ file: "/f", cwd: "/h" }, // missing mode
 		];
 		for (const ctx of cases) {
-			expect(parseMessage(JSON.stringify({ type: "prompt", text: "hi", context: ctx }))).toBeNull();
+			expect(
+				parseMessage(
+					JSON.stringify({ type: "prompt", text: "hi", context: ctx }),
+				),
+			).toBeNull();
 		}
 	});
 
@@ -94,13 +105,23 @@ describe("parseMessage", () => {
 			JSON.stringify({
 				type: "prompt",
 				text: "hi",
-				context: { file: "/f.ts", cwd: "/", mode: "normal", filetype: "typescript" },
+				context: {
+					file: "/f.ts",
+					cwd: "/",
+					mode: "normal",
+					filetype: "typescript",
+				},
 			}),
 		);
 		expect(msg).toEqual({
 			type: "prompt",
 			text: "hi",
-			context: { file: "/f.ts", cwd: "/", mode: "normal", filetype: "typescript" },
+			context: {
+				file: "/f.ts",
+				cwd: "/",
+				mode: "normal",
+				filetype: "typescript",
+			},
 		});
 	});
 
@@ -123,7 +144,12 @@ describe("parseMessage", () => {
 			JSON.stringify({
 				type: "prompt",
 				text: "hi",
-				context: { file: "/f", cwd: "/c", mode: "normal", buffer_state: "scratch" },
+				context: {
+					file: "/f",
+					cwd: "/c",
+					mode: "normal",
+					buffer_state: "scratch",
+				},
 			}),
 		);
 		expect(msg).not.toBeNull();
@@ -137,7 +163,12 @@ describe("parseMessage", () => {
 			JSON.stringify({
 				type: "prompt",
 				text: "hi",
-				context: { file: "/f", cwd: "/c", mode: "normal", buffer_state: "invalid" },
+				context: {
+					file: "/f",
+					cwd: "/c",
+					mode: "normal",
+					buffer_state: "invalid",
+				},
 			}),
 		);
 		expect(msg).not.toBeNull();
@@ -226,9 +257,17 @@ describe("frameBuffer", () => {
 	});
 
 	it("handles multiple messages in one chunk", () => {
-		const msg1 = JSON.stringify({ type: "prompt", text: "a", context: { file: "/f", cwd: "/c", mode: "normal" } });
-		const msg2 = JSON.stringify({ type: "prompt", text: "b", context: { file: "/f", cwd: "/c", content: "y", mode: "visual" } });
-		const buf = msg1 + "\n" + msg2 + "\n";
+		const msg1 = JSON.stringify({
+			type: "prompt",
+			text: "a",
+			context: { file: "/f", cwd: "/c", mode: "normal" },
+		});
+		const msg2 = JSON.stringify({
+			type: "prompt",
+			text: "b",
+			context: { file: "/f", cwd: "/c", content: "y", mode: "visual" },
+		});
+		const buf = `${msg1}\n${msg2}\n`;
 		const { messages, remainder } = frameBuffer(buf);
 		expect(messages).toHaveLength(2);
 		expect(remainder).toBe("");

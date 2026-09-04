@@ -6,15 +6,19 @@
  * pi-bridge.nvim, and injects them into the pi session.
  */
 
-import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
-import { socketPath, ensureSocketDir } from "./path.js";
-import { broadcast, start, stop } from "./socket.js";
-import { parseMessage, serializeEvent } from "./protocol.js";
-import type { OutboundEvent } from "./protocol.js";
+import type {
+	AgentEndEvent,
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { handleMessage } from "./handler.js";
-import { setLogLevel, info, warn, error, LOG_PATH } from "./log.js";
 import type { LogLevel } from "./log.js";
+import { error, info, LOG_PATH, setLogLevel, warn } from "./log.js";
+import { ensureSocketDir, socketPath } from "./path.js";
+import type { OutboundEvent } from "./protocol.js";
+import { parseMessage, serializeEvent } from "./protocol.js";
+import { broadcast, start, stop } from "./socket.js";
 
 /**
  * The ExtensionAPI of the most recent extension instance, shared across jiti
@@ -38,7 +42,8 @@ export function buildStartMessage(ctx: ExtensionContext): string {
 	const model = ctx.model?.name ?? ctx.model?.id ?? "agent";
 	const level = ctx.thinkingLevel;
 	const usage = ctx.getContextUsage();
-	const brain = usage?.percent != null && usage.percent > 0 ? usage.percent : null;
+	const brain =
+		usage?.percent != null && usage.percent > 0 ? usage.percent : null;
 
 	let msg = model;
 	msg += level && level !== "off" ? ` is thinking in ${level}` : " is thinking";
@@ -82,14 +87,21 @@ function buildEndMessage(event: AgentEndEvent): string {
 	}
 
 	const errorMessage = messages
-		.filter((m) => (m.role === "toolResult" && m.isError) || (m.role === "assistant" && m.stopReason === "error"))
-		.flatMap((m) =>
-			(m as any).content?.filter((part: any) => part.type === "text").map((part: any) => part.text) ?? [],
+		.filter(
+			(m) =>
+				(m.role === "toolResult" && m.isError) ||
+				(m.role === "assistant" && m.stopReason === "error"),
+		)
+		.flatMap(
+			(m) =>
+				(m as { content?: Array<{ type?: unknown; text?: unknown }> }).content
+					?.filter((part) => part.type === "text")
+					.map((part) => part.text as string | undefined) ?? [],
 		)
 		.find((text) => text?.trim());
 
 	let result = "done";
-	if (parts.length > 0) result += " — " + parts.join(" · ");
+	if (parts.length > 0) result += ` — ${parts.join(" · ")}`;
 	if (errorMessage) result += ` / ${errorMessage}`;
 	return result;
 }
@@ -99,11 +111,15 @@ export default function (pi: ExtensionAPI) {
 	const level = (process.env.PI_BRIDGE_LOG_LEVEL ?? "info") as LogLevel;
 	setLogLevel(level);
 
-	pi.on("session_start", async (event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		const cwd = ctx.cwd ?? process.cwd();
 		const path = socketPath(cwd);
 
-		info("Starting pi-bridge extension", { cwd, socketPath: path, logPath: LOG_PATH });
+		info("Starting pi-bridge extension", {
+			cwd,
+			socketPath: path,
+			logPath: LOG_PATH,
+		});
 		ensureSocketDir();
 
 		setActivePi(pi);
@@ -127,10 +143,16 @@ export default function (pi: ExtensionAPI) {
 					info("pi-bridge ready", { socketPath: path, pid: process.pid });
 					break;
 				case "already-hosted":
-					info("pi-bridge socket already hosted", { socketPath: path, pid: process.pid });
+					info("pi-bridge socket already hosted", {
+						socketPath: path,
+						pid: process.pid,
+					});
 					break;
 				case "foreign-owner":
-					warn("pi-bridge socket owned by another pi instance", { socketPath: path, pid: process.pid });
+					warn("pi-bridge socket owned by another pi instance", {
+						socketPath: path,
+						pid: process.pid,
+					});
 					ctx.ui.notify(
 						"pi-bridge: another pi instance is running for this directory — pi-bridge not hosting this session",
 						"warning",
@@ -146,14 +168,20 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_start", (_event, ctx) => {
 		const cwd = ctx.cwd ?? process.cwd();
-		const event: OutboundEvent = { type: "agent_start", message: buildStartMessage(ctx) };
+		const event: OutboundEvent = {
+			type: "agent_start",
+			message: buildStartMessage(ctx),
+		};
 		info("Agent started", { cwd });
 		broadcast(serializeEvent(event));
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
 		const cwd = ctx.cwd ?? process.cwd();
-		const event: OutboundEvent = { type: "agent_end", message: buildEndMessage(_event) };
+		const event: OutboundEvent = {
+			type: "agent_end",
+			message: buildEndMessage(_event),
+		};
 		info("Agent completed", { cwd });
 		broadcast(serializeEvent(event));
 	});
@@ -162,7 +190,10 @@ export default function (pi: ExtensionAPI) {
 		// Only a real quit tears the socket down. Session switches (new, resume,
 		// fork, reload) must keep the socket alive so nvim stays connected.
 		if (event.reason !== "quit") {
-			info("pi-bridge socket kept across session switch", { reason: event.reason, pid: process.pid });
+			info("pi-bridge socket kept across session switch", {
+				reason: event.reason,
+				pid: process.pid,
+			});
 			return;
 		}
 		info("Shutting down pi-bridge extension", { pid: process.pid });

@@ -1,7 +1,10 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildStartMessage, default as extension } from "../src/index.js";
 import { start, stop } from "../src/socket.js";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 vi.mock("../src/socket.js", () => ({
 	start: vi.fn(),
@@ -20,7 +23,10 @@ vi.mock("../src/log.js", () => ({
 }));
 
 vi.mock("../src/path.js", () => ({
-	socketPath: vi.fn((cwd: string) => `/tmp/pi-bridge-test-sockets/${cwd.replace(/\//g, "_")}.sock`),
+	socketPath: vi.fn(
+		(cwd: string) =>
+			`/tmp/pi-bridge-test-sockets/${cwd.replace(/\//g, "_")}.sock`,
+	),
 	ensureSocketDir: vi.fn(),
 }));
 
@@ -40,14 +46,25 @@ function mockCtx(
 
 /** Register the extension and return its event handlers plus the pi mock. */
 function registerExtension(): {
-	handlers: Record<string, (event: any, ctx: ExtensionContext) => Promise<void> | void>;
+	handlers: Record<
+		string,
+		(event: any, ctx: ExtensionContext) => Promise<void> | void
+	>;
 	pi: { sendUserMessage: ReturnType<typeof vi.fn> };
 } {
-	const handlers: Record<string, (event: any, ctx: ExtensionContext) => Promise<void> | void> = {};
+	const handlers: Record<
+		string,
+		(event: any, ctx: ExtensionContext) => Promise<void> | void
+	> = {};
 	const pi = {
-		on: vi.fn((event: string, handler: (event: any, ctx: ExtensionContext) => Promise<void> | void) => {
-			handlers[event] = handler;
-		}),
+		on: vi.fn(
+			(
+				event: string,
+				handler: (event: any, ctx: ExtensionContext) => Promise<void> | void,
+			) => {
+				handlers[event] = handler;
+			},
+		),
 		sendUserMessage: vi.fn(),
 	} as unknown as ExtensionAPI;
 	extension(pi);
@@ -66,12 +83,16 @@ describe("buildStartMessage", () => {
 	});
 
 	it("rounds brain usage to two decimal places", () => {
-		const msg = buildStartMessage(mockCtx({ getContextUsage: () => ({ percent: 12.3456 }) }));
+		const msg = buildStartMessage(
+			mockCtx({ getContextUsage: () => ({ percent: 12.3456 }) }),
+		);
 		expect(msg).toContain("at 12.35% brain usage");
 	});
 
 	it("falls back to model id when name is missing", () => {
-		const msg = buildStartMessage(mockCtx({ model: { id: "claude-sonnet-4" } } as any));
+		const msg = buildStartMessage(
+			mockCtx({ model: { id: "claude-sonnet-4" } } as any),
+		);
 		expect(msg).toContain("claude-sonnet-4");
 	});
 
@@ -92,24 +113,37 @@ describe("buildStartMessage", () => {
 	});
 
 	it("includes valid thinking levels", () => {
-		for (const level of ["minimal", "low", "medium", "high", "xhigh", "max"] as const) {
+		for (const level of [
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		] as const) {
 			const msg = buildStartMessage(mockCtx({ thinkingLevel: level }));
 			expect(msg).toContain(`in ${level}`);
 		}
 	});
 
 	it("omits brain usage when percent is null", () => {
-		const msg = buildStartMessage(mockCtx({ getContextUsage: () => ({ percent: null }) } as any));
+		const msg = buildStartMessage(
+			mockCtx({ getContextUsage: () => ({ percent: null }) } as any),
+		);
 		expect(msg).not.toContain("brain usage");
 	});
 
 	it("omits brain usage when percent is 0", () => {
-		const msg = buildStartMessage(mockCtx({ getContextUsage: () => ({ percent: 0 }) }));
+		const msg = buildStartMessage(
+			mockCtx({ getContextUsage: () => ({ percent: 0 }) }),
+		);
 		expect(msg).not.toContain("brain usage");
 	});
 
 	it("omits brain usage when getContextUsage returns undefined", () => {
-		const msg = buildStartMessage(mockCtx({ getContextUsage: () => undefined }));
+		const msg = buildStartMessage(
+			mockCtx({ getContextUsage: () => undefined }),
+		);
 		expect(msg).not.toContain("brain usage");
 	});
 });
@@ -117,7 +151,10 @@ describe("buildStartMessage", () => {
 describe("extension socket lifecycle", () => {
 	it("starts the socket on session_start", async () => {
 		const { handlers } = registerExtension();
-		await handlers.session_start({ type: "session_start", reason: "startup" }, mockCtx());
+		await handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(),
+		);
 
 		expect(start).toHaveBeenCalledTimes(1);
 		expect(stop).not.toHaveBeenCalled();
@@ -126,14 +163,20 @@ describe("extension socket lifecycle", () => {
 	it("keeps the socket across session switches (new, resume, fork, reload)", async () => {
 		const { handlers } = registerExtension();
 		for (const reason of ["new", "resume", "fork", "reload"] as const) {
-			await handlers.session_shutdown({ type: "session_shutdown", reason }, mockCtx());
+			await handlers.session_shutdown(
+				{ type: "session_shutdown", reason },
+				mockCtx(),
+			);
 		}
 		expect(stop).not.toHaveBeenCalled();
 	});
 
 	it("stops the socket on quit", async () => {
 		const { handlers } = registerExtension();
-		await handlers.session_shutdown({ type: "session_shutdown", reason: "quit" }, mockCtx());
+		await handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "quit" },
+			mockCtx(),
+		);
 		expect(stop).toHaveBeenCalledTimes(1);
 	});
 
@@ -142,7 +185,10 @@ describe("extension socket lifecycle", () => {
 		const notify = vi.fn();
 		const { handlers } = registerExtension();
 
-		await handlers.session_start({ type: "session_start", reason: "startup" }, mockCtx(undefined, notify));
+		await handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, notify),
+		);
 
 		expect(notify).toHaveBeenCalledWith(
 			"pi-bridge: another pi instance is running for this directory — pi-bridge not hosting this session",
@@ -154,7 +200,10 @@ describe("extension socket lifecycle", () => {
 		const notify = vi.fn();
 		const { handlers } = registerExtension();
 
-		await handlers.session_start({ type: "session_start", reason: "startup" }, mockCtx(undefined, notify));
+		await handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, notify),
+		);
 
 		expect(notify).not.toHaveBeenCalled();
 	});
@@ -164,7 +213,10 @@ describe("extension socket lifecycle", () => {
 		const notify = vi.fn();
 		const { handlers } = registerExtension();
 
-		await handlers.session_start({ type: "session_start", reason: "new" }, mockCtx(undefined, notify));
+		await handlers.session_start(
+			{ type: "session_start", reason: "new" },
+			mockCtx(undefined, notify),
+		);
 
 		expect(notify).not.toHaveBeenCalled();
 	});
@@ -180,20 +232,35 @@ describe("extension socket lifecycle", () => {
 		});
 
 		const first = registerExtension();
-		await first.handlers.session_start({ type: "session_start", reason: "startup" }, mockCtx());
+		await first.handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(),
+		);
 
 		// Simulate session replacement: jiti re-evaluates the module and a new
 		// extension instance registers on a fresh pi object.
 		const second = registerExtension();
-		await second.handlers.session_start({ type: "session_start", reason: "new" }, mockCtx());
+		await second.handlers.session_start(
+			{ type: "session_start", reason: "new" },
+			mockCtx(),
+		);
 
-		onMessage!(JSON.stringify({
-			type: "prompt",
-			text: "hello from nvim",
-			context: { file: new URL(import.meta.url).pathname, cwd: "/tmp", mode: "normal", buffer_state: "saved" },
-		}));
+		onMessage?.(
+			JSON.stringify({
+				type: "prompt",
+				text: "hello from nvim",
+				context: {
+					file: new URL(import.meta.url).pathname,
+					cwd: "/tmp",
+					mode: "normal",
+					buffer_state: "saved",
+				},
+			}),
+		);
 
 		expect(first.pi.sendUserMessage).not.toHaveBeenCalled();
-		expect(second.pi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("hello from nvim"));
+		expect(second.pi.sendUserMessage).toHaveBeenCalledWith(
+			expect.stringContaining("hello from nvim"),
+		);
 	});
 });

@@ -9,10 +9,21 @@
  * server instead of losing it.
  */
 
-import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { existsSync, renameSync, unlinkSync, chmodSync, statSync } from "node:fs";
-import { frameBuffer } from "./protocol.js";
+import {
+	chmodSync,
+	existsSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+} from "node:fs";
+import {
+	createConnection,
+	createServer,
+	type Server,
+	type Socket,
+} from "node:net";
 import { debug, error, info, warn } from "./log.js";
+import { frameBuffer } from "./protocol.js";
 
 /** Max buffer size per connection (1MB). Messages exceeding this are dropped. */
 const MAX_BUFFER_BYTES = 1 * 1024 * 1024;
@@ -71,7 +82,10 @@ export async function start(
 	onMessage: (data: string) => void,
 ): Promise<StartResult> {
 	if (state.server) {
-		info("Socket server already running", { path: state.socketPath, pid: process.pid });
+		info("Socket server already running", {
+			path: state.socketPath,
+			pid: process.pid,
+		});
 		return { status: "already-hosted" };
 	}
 
@@ -79,7 +93,10 @@ export async function start(
 	if (existsSync(path)) {
 		const alive = await probeExistingSocket(path);
 		if (alive) {
-			info("Socket already in use by another process", { path, pid: process.pid });
+			info("Socket already in use by another process", {
+				path,
+				pid: process.pid,
+			});
 			return { status: "foreign-owner" };
 		}
 		// Stale socket — remove it
@@ -166,9 +183,13 @@ export async function stop(): Promise<void> {
 		// been rebound by a newer session, move it out of the way first and
 		// restore it after close, so a dying old instance cannot delete the
 		// new owner's socket file.
-		const foreignFile = path != null && existsSync(path) && !ownsPath(path, bindInode);
+		const foreignFile =
+			path != null && existsSync(path) && !ownsPath(path, bindInode);
 		if (foreignFile) {
-			info("Socket file owned by newer session; leaving in place", { path, pid: process.pid });
+			info("Socket file owned by newer session; leaving in place", {
+				path,
+				pid: process.pid,
+			});
 		}
 		let displaced: string | null = null;
 		if (foreignFile && path != null) {
@@ -186,10 +207,10 @@ export async function stop(): Promise<void> {
 		await new Promise<void>((resolve) => {
 			const timer = setTimeout(() => {
 				deadlineFired = true;
-				warn(
-					"Socket server close exceeded deadline; continuing shutdown",
-					{ path, timeoutMs: SHUTDOWN_TIMEOUT_MS },
-				);
+				warn("Socket server close exceeded deadline; continuing shutdown", {
+					path,
+					timeoutMs: SHUTDOWN_TIMEOUT_MS,
+				});
 				resolve();
 			}, SHUTDOWN_TIMEOUT_MS);
 
@@ -206,16 +227,22 @@ export async function stop(): Promise<void> {
 		if (displaced) {
 			// Restore the newer session's socket file (rename preserves its inode).
 			try {
-				renameSync(displaced, path!);
+				renameSync(displaced, path as string);
 			} catch (err) {
-				warn("Failed to restore rebound socket file", { path, err: String(err) });
+				warn("Failed to restore rebound socket file", {
+					path,
+					err: String(err),
+				});
 			}
 		} else if (path && existsSync(path)) {
 			// close() normally unlinks our own file; clean up defensively.
 			try {
 				unlinkSync(path);
 			} catch (err) {
-				warn("Failed to remove socket file on shutdown", { path, err: String(err) });
+				warn("Failed to remove socket file on shutdown", {
+					path,
+					err: String(err),
+				});
 			}
 		}
 
@@ -236,7 +263,10 @@ export async function stop(): Promise<void> {
  * is not destroyed. Logs each broadcast at debug level.
  */
 export function broadcast(data: string): void {
-	debug("Broadcasting to connections", { count: state.connections.size, data: data.trim() });
+	debug("Broadcasting to connections", {
+		count: state.connections.size,
+		data: data.trim(),
+	});
 	for (const conn of state.connections) {
 		if (!conn.destroyed) {
 			try {
@@ -294,7 +324,10 @@ function probeExistingSocket(path: string): Promise<boolean> {
 }
 
 /** Handle a single client connection: buffer data, split on newlines. */
-function handleConnection(conn: Socket, onMessage: (data: string) => void): void {
+function handleConnection(
+	conn: Socket,
+	onMessage: (data: string) => void,
+): void {
 	let buffer = "";
 
 	conn.on("data", (chunk: Buffer) => {

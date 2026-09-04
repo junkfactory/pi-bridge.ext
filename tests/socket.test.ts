@@ -1,10 +1,17 @@
-import { describe, expect, it, afterEach, beforeEach, vi } from "vitest";
-import { start, stop, broadcast } from "../src/socket.js";
-import { info, warn } from "../src/log.js";
+import {
+	existsSync,
+	mkdtempSync,
+	rmSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { createConnection, createServer } from "node:net";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { info } from "../src/log.js";
+import { broadcast, start, stop } from "../src/socket.js";
 
 vi.mock("../src/log.js", () => ({
 	LOG_PATH: "/tmp/pi-bridge-test.log",
@@ -26,7 +33,9 @@ vi.mock("node:net", async (importOriginal) => {
 				// half-dead listener so the probe timeout path is exercised.
 				return new actual.Socket();
 			}
-			return actual.createConnection(...(args as Parameters<typeof actual.createConnection>));
+			return actual.createConnection(
+				...(args as Parameters<typeof actual.createConnection>),
+			);
 		},
 	};
 });
@@ -54,7 +63,10 @@ function connect(): Promise<ReturnType<typeof createConnection>> {
 }
 
 /** Helper: send data over a socket. */
-function send(sock: ReturnType<typeof createConnection>, data: string): Promise<void> {
+function send(
+	sock: ReturnType<typeof createConnection>,
+	data: string,
+): Promise<void> {
 	return new Promise((resolve, reject) => {
 		sock.write(data, (err) => {
 			if (err) reject(err);
@@ -64,15 +76,13 @@ function send(sock: ReturnType<typeof createConnection>, data: string): Promise<
 }
 
 /** Helper: wait for a condition with timeout. */
-function waitFor(
-	check: () => boolean,
-	timeoutMs = 1000,
-): Promise<void> {
+function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const start = Date.now();
 		const poll = () => {
 			if (check()) return resolve();
-			if (Date.now() - start > timeoutMs) return reject(new Error("waitFor timeout"));
+			if (Date.now() - start > timeoutMs)
+				return reject(new Error("waitFor timeout"));
 			setTimeout(poll, 10);
 		};
 		poll();
@@ -95,10 +105,16 @@ describe("socket lifecycle", () => {
 
 	it("logs lifecycle events with the process pid", async () => {
 		await start(sockPath, () => {});
-		expect(info).toHaveBeenCalledWith("Socket server started", { path: sockPath, pid: process.pid });
+		expect(info).toHaveBeenCalledWith("Socket server started", {
+			path: sockPath,
+			pid: process.pid,
+		});
 
 		await stop();
-		expect(info).toHaveBeenCalledWith("Socket server stopped", { path: sockPath, pid: process.pid });
+		expect(info).toHaveBeenCalledWith("Socket server stopped", {
+			path: sockPath,
+			pid: process.pid,
+		});
 	});
 
 	it("returns already-hosted if already running", async () => {
@@ -245,21 +261,21 @@ describe("broadcast", () => {
 		const sock1 = await connect();
 		const sock2 = await connect();
 
-			// Destroy sock1 before broadcasting
-			sock1.destroy();
-			await waitFor(() => sock1.destroyed);
+		// Destroy sock1 before broadcasting
+		sock1.destroy();
+		await waitFor(() => sock1.destroyed);
 
 		const data = '{"type":"agent_end","message":"done"}\n';
 
 		const received2: string[] = [];
-			sock2.on("data", (chunk) => received2.push(chunk.toString()));
+		sock2.on("data", (chunk) => received2.push(chunk.toString()));
 
-			broadcast(data);
+		broadcast(data);
 
-			await waitFor(() => received2.length > 0);
-			expect(received2[0]).toBe(data);
+		await waitFor(() => received2.length > 0);
+		expect(received2[0]).toBe(data);
 
-			sock2.destroy();
+		sock2.destroy();
 	});
 
 	it("is a noop with no connections", () => {
@@ -370,7 +386,10 @@ describe("shutdown with active clients", () => {
 
 		expect(existsSync(sockPath)).toBe(false);
 
-		await waitFor(() => sock1.destroyed && sock2.destroyed && sock3.destroyed, 1000);
+		await waitFor(
+			() => sock1.destroyed && sock2.destroyed && sock3.destroyed,
+			1000,
+		);
 		expect(sock1.destroyed).toBe(true);
 		expect(sock2.destroyed).toBe(true);
 		expect(sock3.destroyed).toBe(true);
@@ -381,11 +400,7 @@ describe("shutdown with active clients", () => {
 		await connect();
 
 		// Fire multiple concurrent stops; none should throw or hang.
-		const results = await Promise.all([
-			stop(),
-			stop(),
-			stop(),
-		]);
+		const results = await Promise.all([stop(), stop(), stop()]);
 
 		expect(results.every((r) => r === undefined)).toBe(true);
 		expect(existsSync(sockPath)).toBe(false);

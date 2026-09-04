@@ -94,7 +94,9 @@ export function serializeEvent(event: OutboundEvent): string {
 // Internal validators
 // ---------------------------------------------------------------------------
 
-function parsePromptMessage(obj: Record<string, unknown>): PromptMessage | null {
+function parsePromptMessage(
+	obj: Record<string, unknown>,
+): PromptMessage | null {
 	if (typeof obj.text !== "string") return null;
 	if (!isRecord(obj.context)) return null;
 
@@ -118,7 +120,8 @@ function parsePromptMessage(obj: Record<string, unknown>): PromptMessage | null 
 		"modified",
 		"saved",
 	] as const);
-	type BufferState = (typeof VALID_BUFFER_STATES extends Set<infer T> ? T : never);
+	type BufferState =
+		typeof VALID_BUFFER_STATES extends Set<infer T> ? T : never;
 	if (typeof ctx.buffer_state === "string") {
 		const state = ctx.buffer_state as BufferState;
 		if (VALID_BUFFER_STATES.has(state)) {

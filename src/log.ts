@@ -18,10 +18,7 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 	error: 4,
 };
 
-export const LOG_PATH = join(
-	process.env.HOME ?? "",
-	".pi/agent/pi-bridge.log",
-);
+export const LOG_PATH = join(process.env.HOME ?? "", ".pi/agent/pi-bridge.log");
 
 let minLevel: LogLevel = "info";
 
@@ -36,9 +33,10 @@ export function log(level: LogLevel, message: string, data?: unknown): void {
 
 	const timestamp = new Date().toISOString();
 	const prefix = `[${timestamp}] [${level.toUpperCase().padEnd(5)}]`;
-	const line = data !== undefined
-		? `${prefix} ${message} ${JSON.stringify(data)}\n`
-		: `${prefix} ${message}\n`;
+	const line =
+		data !== undefined
+			? `${prefix} ${message} ${JSON.stringify(data)}\n`
+			: `${prefix} ${message}\n`;
 
 	try {
 		mkdirSync(dirname(LOG_PATH), { recursive: true });

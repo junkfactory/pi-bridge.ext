@@ -46,7 +46,9 @@ describe("handleMessage", () => {
 		const pi = mockPi();
 		handleMessage(
 			pi,
-			makePrompt({ context: { file: "src/main.ts", cwd: "/c", mode: "normal" } }),
+			makePrompt({
+				context: { file: "src/main.ts", cwd: "/c", mode: "normal" },
+			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix this");
@@ -58,7 +60,13 @@ describe("handleMessage", () => {
 			pi,
 			makePrompt({
 				text: "hello",
-				context: { file: "/f.ts", cwd: "/c", mode: "normal", filetype: "ts", buffer_state: "saved" },
+				context: {
+					file: "/f.ts",
+					cwd: "/c",
+					mode: "normal",
+					filetype: "ts",
+					buffer_state: "saved",
+				},
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
@@ -73,7 +81,12 @@ describe("handleMessage", () => {
 			pi,
 			makePrompt({
 				text: "explain",
-				context: { file: "/home/user/src/utils.ts", cwd: "/c", mode: "visual", buffer_state: "saved" },
+				context: {
+					file: "/home/user/src/utils.ts",
+					cwd: "/c",
+					mode: "visual",
+					buffer_state: "saved",
+				},
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();

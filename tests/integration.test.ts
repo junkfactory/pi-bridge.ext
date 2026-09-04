@@ -6,16 +6,16 @@
  * correctly formatted user message.
  */
 
-import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
-import { start, stop, broadcast } from "../src/socket.js";
-import { parseMessage } from "../src/protocol.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { createConnection } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleMessage } from "../src/handler.js";
 import index from "../src/index.js";
-import { createConnection } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { parseMessage } from "../src/protocol.js";
+import { start, stop } from "../src/socket.js";
 
 let tmpDir: string;
 let sockPath: string;
@@ -38,7 +38,10 @@ function connect(): Promise<ReturnType<typeof createConnection>> {
 	});
 }
 
-function send(sock: ReturnType<typeof createConnection>, data: string): Promise<void> {
+function send(
+	sock: ReturnType<typeof createConnection>,
+	data: string,
+): Promise<void> {
 	return new Promise((resolve, reject) => {
 		sock.write(data, (err) => {
 			if (err) reject(err);
@@ -52,7 +55,8 @@ function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
 		const start = Date.now();
 		const poll = () => {
 			if (check()) return resolve();
-			if (Date.now() - start > timeoutMs) return reject(new Error("waitFor timeout"));
+			if (Date.now() - start > timeoutMs)
+				return reject(new Error("waitFor timeout"));
 			setTimeout(poll, 10);
 		};
 		poll();
@@ -71,7 +75,7 @@ describe("integration: socket → protocol → handler → pi", () => {
 
 		// Send a prompt through the socket
 		const sock = await connect();
-		const msg = JSON.stringify({
+		const msg = `${JSON.stringify({
 			type: "prompt",
 			text: "add error handling",
 			context: {
@@ -80,7 +84,7 @@ describe("integration: socket → protocol → handler → pi", () => {
 				mode: "normal",
 				buffer_state: "saved",
 			},
-		}) + "\n";
+		})}\n`;
 		await send(sock, msg);
 		sock.destroy();
 
@@ -103,7 +107,7 @@ describe("integration: socket → protocol → handler → pi", () => {
 		});
 
 		const sock = await connect();
-		const msg = JSON.stringify({
+		const msg = `${JSON.stringify({
 			type: "prompt",
 			text: "explain this",
 			context: {
@@ -112,7 +116,7 @@ describe("integration: socket → protocol → handler → pi", () => {
 				mode: "visual",
 				buffer_state: "saved",
 			},
-		}) + "\n";
+		})}\n`;
 		await send(sock, msg);
 		sock.destroy();
 
@@ -133,7 +137,7 @@ describe("integration: socket → protocol → handler → pi", () => {
 
 		const sock = await connect();
 		await send(sock, '{"type":"unknown"}\n');
-		await send(sock, 'not json\n');
+		await send(sock, "not json\n");
 		sock.destroy();
 
 		await new Promise((r) => setTimeout(r, 200));
@@ -178,10 +182,14 @@ describe("integration: agent_start and agent_end hooks", () => {
 		const ctx = makeMockCtx({
 			model: { id: "claude-opus-4", name: "Claude Opus 4" },
 			thinkingLevel: "medium",
-			getContextUsage: () => ({ tokens: 50000, contextWindow: 200000, percent: 25 }),
+			getContextUsage: () => ({
+				tokens: 50000,
+				contextWindow: 200000,
+				percent: 25,
+			}),
 		});
 
-		mockPi.handlers["agent_start"]({}, ctx);
+		mockPi.handlers.agent_start({}, ctx);
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
@@ -204,7 +212,7 @@ describe("integration: agent_start and agent_end hooks", () => {
 
 		const ctx = makeMockCtx({ model: { id: "gpt-5", name: "GPT-5" } });
 
-		mockPi.handlers["agent_start"]({}, ctx);
+		mockPi.handlers.agent_start({}, ctx);
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
@@ -224,11 +232,14 @@ describe("integration: agent_start and agent_end hooks", () => {
 
 		const ctx = makeMockCtx({ model: { id: "claude-haiku" } });
 
-		mockPi.handlers["agent_start"]({}, ctx);
+		mockPi.handlers.agent_start({}, ctx);
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
-		expect(msg).toEqual({ type: "agent_start", message: "claude-haiku is thinking" });
+		expect(msg).toEqual({
+			type: "agent_start",
+			message: "claude-haiku is thinking",
+		});
 		sock.destroy();
 	});
 
@@ -242,7 +253,7 @@ describe("integration: agent_start and agent_end hooks", () => {
 		const received: string[] = [];
 		sock.on("data", (chunk) => received.push(chunk.toString()));
 
-		mockPi.handlers["agent_start"]({}, makeMockCtx());
+		mockPi.handlers.agent_start({}, makeMockCtx());
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
@@ -260,7 +271,7 @@ describe("integration: agent_start and agent_end hooks", () => {
 		const received: string[] = [];
 		sock.on("data", (chunk) => received.push(chunk.toString()));
 
-		mockPi.handlers["agent_end"]({ messages: [] }, makeMockCtx());
+		mockPi.handlers.agent_end({ messages: [] }, makeMockCtx());
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
@@ -318,7 +329,7 @@ describe("integration: agent_start and agent_end hooks", () => {
 			],
 		};
 
-		mockPi.handlers["agent_end"](event, makeMockCtx());
+		mockPi.handlers.agent_end(event, makeMockCtx());
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
@@ -356,7 +367,7 @@ describe("integration: agent_start and agent_end hooks", () => {
 			],
 		};
 
-		mockPi.handlers["agent_end"](event, makeMockCtx());
+		mockPi.handlers.agent_end(event, makeMockCtx());
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
@@ -391,7 +402,7 @@ describe("integration: agent_start and agent_end hooks", () => {
 			],
 		};
 
-		mockPi.handlers["agent_end"](event, makeMockCtx());
+		mockPi.handlers.agent_end(event, makeMockCtx());
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
@@ -424,7 +435,13 @@ describe("integration: agent_start and agent_end hooks", () => {
 						cacheRead: 0,
 						cacheWrite: 0,
 						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						cost: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							total: 0,
+						},
 					},
 					stopReason: "error",
 					timestamp: 0,
@@ -432,7 +449,7 @@ describe("integration: agent_start and agent_end hooks", () => {
 			],
 		};
 
-		mockPi.handlers["agent_end"](event, makeMockCtx());
+		mockPi.handlers.agent_end(event, makeMockCtx());
 
 		await waitFor(() => received.length === 1);
 		const msg = JSON.parse(received[0].trim());
@@ -453,17 +470,22 @@ describe("integration: agent_start and agent_end hooks", () => {
 		const received: string[] = [];
 		sock.on("data", (chunk) => received.push(chunk.toString()));
 
-		const ctx = makeMockCtx({ model: { id: "claude-opus-4", name: "Claude Opus 4" } });
+		const ctx = makeMockCtx({
+			model: { id: "claude-opus-4", name: "Claude Opus 4" },
+		});
 
-		mockPi.handlers["agent_start"]({}, ctx);
+		mockPi.handlers.agent_start({}, ctx);
 		await waitFor(() => received.length === 1);
 
-		mockPi.handlers["agent_end"]({ messages: [] }, ctx);
+		mockPi.handlers.agent_end({ messages: [] }, ctx);
 		await waitFor(() => received.length === 2);
 
 		const startMsg = JSON.parse(received[0].trim());
 		const endMsg = JSON.parse(received[1].trim());
-		expect(startMsg).toEqual({ type: "agent_start", message: "Claude Opus 4 is thinking" });
+		expect(startMsg).toEqual({
+			type: "agent_start",
+			message: "Claude Opus 4 is thinking",
+		});
 		expect(endMsg).toEqual({ type: "agent_end", message: "done" });
 		sock.destroy();
 	});

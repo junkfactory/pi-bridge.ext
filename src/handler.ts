@@ -27,7 +27,7 @@ export function handleMessage(pi: ExtensionAPI, message: InboundMessage): void {
  * Returns null if the path is empty or not absolute.
  */
 function formatFileLink(file: string): string | null {
-	if (!file || !file.startsWith("/")) return null;
+	if (!file?.startsWith("/")) return null;
 	return `File: [${basename(file)}](${file})`;
 }
 
@@ -42,7 +42,7 @@ type FileMention =
 	| { kind: "missing" | "absent" };
 
 function resolveFileMention(file: string): FileMention {
-	if (!file || !file.startsWith("/")) return { kind: "absent" };
+	if (!file?.startsWith("/")) return { kind: "absent" };
 	if (!existsSync(file)) return { kind: "missing" };
 	return { kind: "link", text: `File: [${basename(file)}](${file})` };
 }
