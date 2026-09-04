@@ -19,6 +19,20 @@ Requires [pi](https://github.com/earendil-works/pi-coding-agent) v0.84+.
 
 ### Production
 
+Pin to a release (recommended):
+
+```bash
+pi install git:github.com/junkfactory/pi-bridge.ext@v0.1.0
+```
+
+Update to a new version with:
+
+```bash
+pi install git:github.com/junkfactory/pi-bridge.ext@<version>
+```
+
+Or track main (may encounter instability):
+
 ```bash
 pi install git:github.com/junkfactory/pi-bridge.ext
 ```
