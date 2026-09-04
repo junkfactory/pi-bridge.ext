@@ -15,6 +15,8 @@ This extension opens a Unix socket on session start, listens for incoming messag
 
 ## Install
 
+Requires [pi](https://github.com/earendil-works/pi-coding-agent) v0.84+.
+
 ### Production
 
 ```bash
