@@ -149,10 +149,12 @@ describe("integration: socket → protocol → handler → pi", () => {
 // Mock ExtensionAPI for testing agent_start / agent_end hooks from index.ts
 // ---------------------------------------------------------------------------
 
-function createMockPi(): ExtensionAPI & { handlers: Record<string, Function> } {
-	const handlers: Record<string, Function> = {};
+type Handler = (event: unknown, ctx: unknown) => void;
+
+function createMockPi(): ExtensionAPI & { handlers: Record<string, Handler> } {
+	const handlers: Record<string, Handler> = {};
 	return {
-		on(event: string, handler: Function) {
+		on(event: string, handler: Handler) {
 			handlers[event] = handler;
 		},
 		handlers,

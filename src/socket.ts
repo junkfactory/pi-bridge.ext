@@ -57,14 +57,17 @@ const globalScope = globalThis as typeof globalThis & {
 };
 
 /** Shared singleton state (survives jiti module reloads within one process). */
-const state: SocketState = (globalScope.__piBridgeSocket ??= {
-	server: null,
-	socketPath: null,
-	connections: new Set<Socket>(),
-	stopping: null,
-	bindInode: null,
-	signalsRegistered: false,
-});
+if (!globalScope.__piBridgeSocket) {
+	globalScope.__piBridgeSocket = {
+		server: null,
+		socketPath: null,
+		connections: new Set<Socket>(),
+		stopping: null,
+		bindInode: null,
+		signalsRegistered: false,
+	};
+}
+const state: SocketState = globalScope.__piBridgeSocket;
 
 /**
  * Start listening on the given socket path.

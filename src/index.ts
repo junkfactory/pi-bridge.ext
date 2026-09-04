@@ -31,7 +31,10 @@ const globalScope = globalThis as typeof globalThis & {
 };
 
 function setActivePi(pi: ExtensionAPI): void {
-	(globalScope.__piBridgeApi ??= { pi: null }).pi = pi;
+	if (!globalScope.__piBridgeApi) {
+		globalScope.__piBridgeApi = { pi: null };
+	}
+	globalScope.__piBridgeApi.pi = pi;
 }
 
 function getActivePi(): ExtensionAPI | null {
