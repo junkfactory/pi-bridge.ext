@@ -38,8 +38,11 @@ function mockCtx(
 	} as unknown as ExtensionContext;
 }
 
-/** Register the extension and return its event handlers. */
-function registerExtension(): Record<string, (event: any, ctx: ExtensionContext) => Promise<void> | void> {
+/** Register the extension and return its event handlers plus the pi mock. */
+function registerExtension(): {
+	handlers: Record<string, (event: any, ctx: ExtensionContext) => Promise<void> | void>;
+	pi: { sendUserMessage: ReturnType<typeof vi.fn> };
+} {
 	const handlers: Record<string, (event: any, ctx: ExtensionContext) => Promise<void> | void> = {};
 	const pi = {
 		on: vi.fn((event: string, handler: (event: any, ctx: ExtensionContext) => Promise<void> | void) => {
@@ -48,7 +51,7 @@ function registerExtension(): Record<string, (event: any, ctx: ExtensionContext)
 		sendUserMessage: vi.fn(),
 	} as unknown as ExtensionAPI;
 	extension(pi);
-	return handlers;
+	return { handlers, pi: pi as { sendUserMessage: ReturnType<typeof vi.fn> } };
 }
 
 beforeEach(() => {
@@ -113,7 +116,7 @@ describe("buildStartMessage", () => {
 
 describe("extension socket lifecycle", () => {
 	it("starts the socket on session_start", async () => {
-		const handlers = registerExtension();
+		const { handlers } = registerExtension();
 		await handlers.session_start({ type: "session_start", reason: "startup" }, mockCtx());
 
 		expect(start).toHaveBeenCalledTimes(1);
@@ -121,7 +124,7 @@ describe("extension socket lifecycle", () => {
 	});
 
 	it("keeps the socket across session switches (new, resume, fork, reload)", async () => {
-		const handlers = registerExtension();
+		const { handlers } = registerExtension();
 		for (const reason of ["new", "resume", "fork", "reload"] as const) {
 			await handlers.session_shutdown({ type: "session_shutdown", reason }, mockCtx());
 		}
@@ -129,7 +132,7 @@ describe("extension socket lifecycle", () => {
 	});
 
 	it("stops the socket on quit", async () => {
-		const handlers = registerExtension();
+		const { handlers } = registerExtension();
 		await handlers.session_shutdown({ type: "session_shutdown", reason: "quit" }, mockCtx());
 		expect(stop).toHaveBeenCalledTimes(1);
 	});
@@ -137,7 +140,7 @@ describe("extension socket lifecycle", () => {
 	it("notifies when another pi instance owns the socket", async () => {
 		vi.mocked(start).mockResolvedValue({ status: "foreign-owner" });
 		const notify = vi.fn();
-		const handlers = registerExtension();
+		const { handlers } = registerExtension();
 
 		await handlers.session_start({ type: "session_start", reason: "startup" }, mockCtx(undefined, notify));
 
@@ -149,7 +152,7 @@ describe("extension socket lifecycle", () => {
 
 	it("does not notify when hosting normally on startup", async () => {
 		const notify = vi.fn();
-		const handlers = registerExtension();
+		const { handlers } = registerExtension();
 
 		await handlers.session_start({ type: "session_start", reason: "startup" }, mockCtx(undefined, notify));
 
@@ -159,10 +162,38 @@ describe("extension socket lifecycle", () => {
 	it("does not notify for already-hosted sessions after a switch", async () => {
 		vi.mocked(start).mockResolvedValue({ status: "already-hosted" });
 		const notify = vi.fn();
-		const handlers = registerExtension();
+		const { handlers } = registerExtension();
 
 		await handlers.session_start({ type: "session_start", reason: "new" }, mockCtx(undefined, notify));
 
 		expect(notify).not.toHaveBeenCalled();
+	});
+
+	it("dispatches inbound messages to the latest extension instance after session replacement", async () => {
+		// The socket's message callback is registered by the first instance and
+		// outlives session replacement (/new, /resume...). The captured `pi` of
+		// the first instance is stale, so dispatch must resolve the latest one.
+		let onMessage: ((raw: string) => void) | undefined;
+		vi.mocked(start).mockImplementation(async (_path, cb) => {
+			onMessage ??= cb; // first bind wins; later instances adopt (already-hosted)
+			return { status: "started" };
+		});
+
+		const first = registerExtension();
+		await first.handlers.session_start({ type: "session_start", reason: "startup" }, mockCtx());
+
+		// Simulate session replacement: jiti re-evaluates the module and a new
+		// extension instance registers on a fresh pi object.
+		const second = registerExtension();
+		await second.handlers.session_start({ type: "session_start", reason: "new" }, mockCtx());
+
+		onMessage!(JSON.stringify({
+			type: "prompt",
+			text: "hello from nvim",
+			context: { file: new URL(import.meta.url).pathname, cwd: "/tmp", mode: "normal", buffer_state: "saved" },
+		}));
+
+		expect(first.pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(second.pi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("hello from nvim"));
 	});
 });

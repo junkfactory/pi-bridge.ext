@@ -16,6 +16,24 @@ import { handleMessage } from "./handler.js";
 import { setLogLevel, info, warn, error, LOG_PATH } from "./log.js";
 import type { LogLevel } from "./log.js";
 
+/**
+ * The ExtensionAPI of the most recent extension instance, shared across jiti
+ * module re-evaluations. The socket's message callback outlives session
+ * replacements, so it must resolve `pi` at message time — a captured old `pi`
+ * is stale after ctx.newSession()/fork()/switchSession()/reload() and throws.
+ */
+const globalScope = globalThis as typeof globalThis & {
+	__piBridgeApi?: { pi: ExtensionAPI | null };
+};
+
+function setActivePi(pi: ExtensionAPI): void {
+	(globalScope.__piBridgeApi ??= { pi: null }).pi = pi;
+}
+
+function getActivePi(): ExtensionAPI | null {
+	return globalScope.__piBridgeApi?.pi ?? null;
+}
+
 export function buildStartMessage(ctx: ExtensionContext): string {
 	const model = ctx.model?.name ?? ctx.model?.id ?? "agent";
 	const level = ctx.thinkingLevel;
@@ -88,6 +106,7 @@ export default function (pi: ExtensionAPI) {
 		info("Starting pi-bridge extension", { cwd, socketPath: path, logPath: LOG_PATH });
 		ensureSocketDir();
 
+		setActivePi(pi);
 		try {
 			const result = await start(path, (raw) => {
 				const message = parseMessage(raw);
@@ -95,7 +114,12 @@ export default function (pi: ExtensionAPI) {
 					warn("Received invalid message", { raw });
 					return;
 				}
-				handleMessage(pi, message);
+				const active = getActivePi();
+				if (!active) {
+					warn("No active extension API for inbound message", { raw });
+					return;
+				}
+				handleMessage(active, message);
 			});
 
 			switch (result.status) {
