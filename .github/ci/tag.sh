@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Release-trigger helper. Run from repo root BEFORE pushing.
-# Usage: ./ci/tag.sh <version>   (e.g. 0.1.0)
-# Set DRY_RUN=1 to skip the destructive steps (npm version, git push).
+# Release-trigger helper. Run from repo root before pushing.
+# Usage: ./.github/ci/tag.sh <version>   (e.g. 0.1.0)
+# Set DRY_RUN=1 to run checks and skip tag/push mutations.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -12,26 +12,31 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-BRANCH="$(git branch --show-current)"
-if [[ "$BRANCH" != "main" ]]; then
-  echo "Not on main (branch: '$BRANCH'). Aborting." >&2
+if ! jj bookmark list main | grep -q '^main:'; then
+  echo "Local main bookmark not found. Aborting." >&2
   exit 1
 fi
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "Working tree not clean. Aborting." >&2
+if ! jj status | grep -q 'Working copy clean'; then
+  echo "Working copy not clean. Aborting." >&2
   exit 1
 fi
-
-npx vitest run
 
 TAG="v$VERSION"
+if jj tag list | grep -qE "(^|[[:space:]])${TAG}([[:space:]]|$)"; then
+  echo "Tag $TAG already exists. Aborting." >&2
+  exit 1
+fi
+
+echo "==> running build checks"
+./.github/ci/build.sh
+
 if [[ -n "${DRY_RUN:-}" ]]; then
-  echo "DRY_RUN: npm version $VERSION"
-  echo "DRY_RUN: git push origin main $TAG"
+  echo "DRY_RUN: jj tag set $TAG -r main"
+  echo "DRY_RUN: jj git push --bookmark main --tag $TAG"
 else
-  npm version "$VERSION"
-  git push origin main "$TAG"
+  jj tag set "$TAG" -r main
+  jj git push --bookmark main --tag "$TAG"
 fi
 
 echo "Done. The $TAG push triggers the release job."
