@@ -74,6 +74,9 @@ function registerExtension(): {
 beforeEach(() => {
 	vi.mocked(start).mockReset().mockResolvedValue({ status: "started" });
 	vi.mocked(stop).mockReset().mockResolvedValue(undefined);
+	// Clear the global owner between tests
+	const g = globalThis as typeof globalThis & { __piBridgeOwner?: unknown };
+	delete g.__piBridgeOwner;
 });
 
 describe("buildStartMessage", () => {
@@ -173,11 +176,37 @@ describe("extension socket lifecycle", () => {
 
 	it("stops the socket on quit", async () => {
 		const { handlers } = registerExtension();
+		// Must start first so this pi instance becomes the owner
+		await handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(),
+		);
 		await handlers.session_shutdown(
 			{ type: "session_shutdown", reason: "quit" },
 			mockCtx(),
 		);
 		expect(stop).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the socket when a child session (non-owner) shuts down", async () => {
+		// Parent session starts and becomes the owner
+		const parent = registerExtension();
+		await parent.handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(),
+		);
+
+		// Child session (different pi instance) loads the extension
+		const child = registerExtension();
+
+		// Child session shuts down with reason "quit" (as pi-subagents does)
+		await child.handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "quit" },
+			mockCtx(),
+		);
+
+		// Parent's socket must still be alive
+		expect(stop).not.toHaveBeenCalled();
 	});
 
 	it("notifies when another pi instance owns the socket", async () => {

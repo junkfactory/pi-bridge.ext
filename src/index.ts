@@ -25,9 +25,15 @@ import { broadcast, start, stop } from "./socket.js";
  * module re-evaluations. The socket's message callback outlives session
  * replacements, so it must resolve `pi` at message time — a captured old `pi`
  * is stale after ctx.newSession()/fork()/switchSession()/reload() and throws.
+ *
+ * The `owner` field tracks which ExtensionAPI instance started the socket.
+ * Only the owner may tear the socket down — child sessions (e.g. from
+ * pi-subagents) that also load this extension must not kill the parent's
+ * socket when they shut down.
  */
 const globalScope = globalThis as typeof globalThis & {
 	__piBridgeApi?: { pi: ExtensionAPI | null };
+	__piBridgeOwner?: ExtensionAPI;
 };
 
 function setActivePi(pi: ExtensionAPI): void {
@@ -143,6 +149,7 @@ export default function (pi: ExtensionAPI) {
 
 			switch (result.status) {
 				case "started":
+					globalScope.__piBridgeOwner = pi;
 					info("pi-bridge ready", { socketPath: path, pid: process.pid });
 					break;
 				case "already-hosted":
@@ -199,7 +206,18 @@ export default function (pi: ExtensionAPI) {
 			});
 			return;
 		}
+		// Only the session that started the socket may tear it down. Child
+		// sessions (e.g. from pi-subagents) emit session_shutdown with
+		// reason "quit" when they finish — but they must not kill the
+		// parent's socket.
+		if (globalScope.__piBridgeOwner !== pi) {
+			info("pi-bridge socket kept alive — child session shutdown", {
+				pid: process.pid,
+			});
+			return;
+		}
 		info("Shutting down pi-bridge extension", { pid: process.pid });
+		globalScope.__piBridgeOwner = undefined;
 		await stop();
 	});
 }
