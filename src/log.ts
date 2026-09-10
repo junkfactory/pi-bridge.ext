@@ -32,7 +32,7 @@ export function log(level: LogLevel, message: string, data?: unknown): void {
 	if (LEVEL_ORDER[level] < LEVEL_ORDER[minLevel]) return;
 
 	const timestamp = new Date().toISOString();
-	const prefix = `[${timestamp}] [${level.toUpperCase().padEnd(5)}]`;
+	const prefix = `[${timestamp}] [${level.toUpperCase().padEnd(5)}] [pid:${process.pid}]`;
 	const line =
 		data !== undefined
 			? `${prefix} ${message} ${JSON.stringify(data)}\n`

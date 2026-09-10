@@ -14,37 +14,44 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { handleMessage } from "./handler.js";
 import type { LogLevel } from "./log.js";
-import { error, info, LOG_PATH, setLogLevel, warn } from "./log.js";
+import { debug, error, info, LOG_PATH, setLogLevel, warn } from "./log.js";
 import { ensureSocketDir, socketPath } from "./path.js";
-import type { OutboundEvent } from "./protocol.js";
+import type { ErrorCode, OutboundEvent } from "./protocol.js";
 import { parseMessage, serializeEvent } from "./protocol.js";
 import { broadcast, start, stop } from "./socket.js";
 
 /**
- * The ExtensionAPI of the most recent extension instance, shared across jiti
- * module re-evaluations. The socket's message callback outlives session
- * replacements, so it must resolve `pi` at message time — a captured old `pi`
- * is stale after ctx.newSession()/fork()/switchSession()/reload() and throws.
+ * Map of ExtensionAPI instances by sessionId, shared across jiti module
+ * re-evaluations. The socket's message callback outlives session replacements,
+ * so it must resolve `pi` at message time — a captured old `pi` is stale after
+ * ctx.newSession()/fork()/switchSession()/reload() and throws.
  *
- * The `owner` field tracks which ExtensionAPI instance started the socket.
+ * Each session's `pi` is registered in the map with its sessionId. When a
+ * message arrives, we look up the owner's `pi` by `ownerSessionId`. This is
+ * order-independent — shutdowns can happen in any order without breaking the
+ * lookup.
+ *
+ * The `ownerSessionId` field tracks which session started the socket.
  * Only the owner may tear the socket down — child sessions (e.g. from
  * pi-subagents) that also load this extension must not kill the parent's
  * socket when they shut down.
  */
 const globalScope = globalThis as typeof globalThis & {
-	__piBridgeApi?: { pi: ExtensionAPI | null };
-	__piBridgeOwner?: ExtensionAPI;
+	__piBridgePiMap?: Map<string, ExtensionAPI>;
+	__piBridgeOwnerSessionId?: string | null;
 };
 
-function setActivePi(pi: ExtensionAPI): void {
-	if (!globalScope.__piBridgeApi) {
-		globalScope.__piBridgeApi = { pi: null };
+function getPiMap(): Map<string, ExtensionAPI> {
+	if (!globalScope.__piBridgePiMap) {
+		globalScope.__piBridgePiMap = new Map();
 	}
-	globalScope.__piBridgeApi.pi = pi;
+	return globalScope.__piBridgePiMap;
 }
 
 function getActivePi(): ExtensionAPI | null {
-	return globalScope.__piBridgeApi?.pi ?? null;
+	const ownerSessionId = globalScope.__piBridgeOwnerSessionId;
+	if (!ownerSessionId) return null;
+	return getPiMap().get(ownerSessionId) ?? null;
 }
 
 export function buildStartMessage(ctx: ExtensionContext): string {
@@ -124,14 +131,24 @@ export default function (pi: ExtensionAPI) {
 		const cwd = ctx.cwd ?? process.cwd();
 		const path = socketPath(cwd);
 
+		const sessionId = ctx.sessionManager.getSessionId();
+
 		info("Starting pi-bridge extension", {
 			cwd,
 			socketPath: path,
 			logPath: LOG_PATH,
+			sessionId,
+			model: ctx.model?.name,
+			reason: _event.reason,
+			mapSize: getPiMap().size,
+			isOwner: !globalScope.__piBridgeOwnerSessionId,
 		});
 		ensureSocketDir();
 
-		setActivePi(pi);
+		getPiMap().set(sessionId, pi);
+		if (!globalScope.__piBridgeOwnerSessionId) {
+			globalScope.__piBridgeOwnerSessionId = sessionId;
+		}
 		try {
 			const result = await start(path, (raw) => {
 				const message = parseMessage(raw);
@@ -139,17 +156,66 @@ export default function (pi: ExtensionAPI) {
 					warn("Received invalid message", { raw });
 					return;
 				}
+				const sid = ctx.sessionManager.getSessionId();
+				info("Inbound message", {
+					type: message.type,
+					textLength: message.text?.length ?? 0,
+					sessionId: sid,
+				});
+				if (message.text) {
+					const preview = message.text.slice(0, 50);
+					debug("Inbound message preview", {
+						preview,
+						sessionId: sid,
+					});
+				}
 				const active = getActivePi();
 				if (!active) {
-					warn("No active extension API for inbound message", { raw });
+					const code: ErrorCode = "no_active_pi";
+					error("No active extension API for inbound message", {
+						type: message.type,
+						code,
+						sessionId: sid,
+					});
+					broadcast(
+						serializeEvent({
+							type: "error",
+							message: "Failed to deliver message to pi",
+							code,
+						}),
+					);
 					return;
 				}
-				handleMessage(active, message);
+				try {
+					handleMessage(active, message);
+					debug("Dispatch succeeded", {
+						type: message.type,
+						sessionId: sid,
+					});
+				} catch (err) {
+					const errStr = String(err);
+					const code: ErrorCode =
+						errStr.includes("stale") || errStr.includes("extension ctx")
+							? "stale_context"
+							: "send_failed";
+					error("Dispatch failed", {
+						type: message.type,
+						code,
+						err: errStr,
+						sessionId: sid,
+					});
+					broadcast(
+						serializeEvent({
+							type: "error",
+							message: "Failed to deliver message to pi",
+							code,
+						}),
+					);
+				}
 			});
 
 			switch (result.status) {
 				case "started":
-					globalScope.__piBridgeOwner = pi;
 					info("pi-bridge ready", { socketPath: path, pid: process.pid });
 					break;
 				case "already-hosted":
@@ -178,28 +244,52 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_start", (_event, ctx) => {
 		const cwd = ctx.cwd ?? process.cwd();
+		const sessionId = ctx.sessionManager.getSessionId();
 		const event: OutboundEvent = {
 			type: "agent_start",
 			message: buildStartMessage(ctx),
 		};
-		info("Agent started", { cwd });
+		info("Agent started", {
+			cwd,
+			sessionId,
+			model: ctx.model?.name,
+			ownerSessionId: globalScope.__piBridgeOwnerSessionId,
+		});
 		broadcast(serializeEvent(event));
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
 		const cwd = ctx.cwd ?? process.cwd();
+		const sessionId = ctx.sessionManager.getSessionId();
 		const event: OutboundEvent = {
 			type: "agent_end",
 			message: buildEndMessage(_event),
 		};
-		info("Agent completed", { cwd });
+		info("Agent completed", {
+			cwd,
+			sessionId,
+			model: ctx.model?.name,
+			ownerSessionId: globalScope.__piBridgeOwnerSessionId,
+		});
 		broadcast(serializeEvent(event));
 	});
 
-	pi.on("session_shutdown", async (event) => {
+	pi.on("session_shutdown", async (event, ctx) => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		getPiMap().delete(sessionId);
+		info("Removed session from pi map", {
+			sessionId,
+			mapSize: getPiMap().size,
+			reason: event.reason,
+		});
 		// Only a real quit tears the socket down. Session switches (new, resume,
 		// fork, reload) must keep the socket alive so nvim stays connected.
 		if (event.reason !== "quit") {
+			// If this session was the owner, clear ownership so a new session
+			// can claim the socket (the socket itself stays alive).
+			if (sessionId === globalScope.__piBridgeOwnerSessionId) {
+				globalScope.__piBridgeOwnerSessionId = null;
+			}
 			info("pi-bridge socket kept across session switch", {
 				reason: event.reason,
 				pid: process.pid,
@@ -210,14 +300,14 @@ export default function (pi: ExtensionAPI) {
 		// sessions (e.g. from pi-subagents) emit session_shutdown with
 		// reason "quit" when they finish — but they must not kill the
 		// parent's socket.
-		if (globalScope.__piBridgeOwner !== pi) {
+		if (sessionId !== globalScope.__piBridgeOwnerSessionId) {
 			info("pi-bridge socket kept alive — child session shutdown", {
 				pid: process.pid,
 			});
 			return;
 		}
 		info("Shutting down pi-bridge extension", { pid: process.pid });
-		globalScope.__piBridgeOwner = undefined;
+		globalScope.__piBridgeOwnerSessionId = null;
 		await stop();
 	});
 }
