@@ -103,7 +103,7 @@ Context is metadata only — file path, cwd, current mode, and filetype. Buffer/
 String indicating the buffer's save state. When present, the handler uses it to emit tailored hints instead of file links. Valid values: `"nameless"`, `"scratch"`, `"unsaved"`, `"modified"`, `"saved"`.
 
 | State | What pi sees |
-|---|---|
+| --- | --- |
 | `saved` | Clickable file link |
 | `modified` | Hint that the file may have unsaved changes |
 | `unsaved` / `nameless` | Hint that the buffer is unsaved (no file path) |
@@ -171,6 +171,28 @@ npx @biomejs/biome check .   # lint + format check (CI runs this too)
 ```
 
 CI fails on lint errors — run `npx @biomejs/biome check --write .` before committing.
+
+## Releasing
+
+Releases are triggered by tagging. The `tag.sh` script handles validation, build checks, tagging, and pushing:
+
+```bash
+./.github/ci/tag.sh 0.1.2   # no 'v' prefix — script adds it
+```
+
+This runs `npm ci`, Biome lint, and the Vitest suite, creates a `v0.1.2` jj tag on main, and pushes. The push triggers a CI job that creates the GitHub release with auto-generated notes.
+
+### Cross-repo pairing
+
+Both repos release independently. The exception is a **socket protocol change** — both repos are then tagged at the same version. After both releases exist, a daily CI job appends a pairing line (e.g. "Requires pi-bridge.nvim v0.1.2") to each release's notes.
+
+### Dry run
+
+```bash
+DRY_RUN=1 ./.github/ci/tag.sh 0.1.2
+```
+
+Runs checks and prints the tag/push commands without mutating anything.
 
 ## Related
 
