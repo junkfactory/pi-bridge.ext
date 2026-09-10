@@ -29,10 +29,14 @@ export interface PromptMessage {
 // Outbound messages (pi → Neovim)
 // ---------------------------------------------------------------------------
 
+/** Error codes for error events. */
+export type ErrorCode = "stale_context" | "send_failed" | "no_active_pi";
+
 /** Event pushed to Neovim. */
 export interface OutboundEvent {
-	type: "agent_start" | "agent_end";
+	type: "agent_start" | "agent_end" | "error";
 	message: string;
+	code?: ErrorCode;
 }
 
 // ---------------------------------------------------------------------------

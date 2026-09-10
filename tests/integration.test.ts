@@ -166,6 +166,7 @@ function makeMockCtx(overrides: Record<string, any> = {}) {
 	return {
 		cwd: "/project",
 		getContextUsage: () => undefined,
+		sessionManager: { getSessionId: () => "test-session-id" },
 		...overrides,
 	} as any;
 }

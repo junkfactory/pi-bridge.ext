@@ -33,6 +33,7 @@ vi.mock("../src/path.js", () => ({
 function mockCtx(
 	overrides?: Partial<ExtensionContext>,
 	notify?: ReturnType<typeof vi.fn>,
+	sessionId?: string,
 ): ExtensionContext {
 	return {
 		model: { name: "Claude", id: "claude-sonnet-4" },
@@ -40,6 +41,7 @@ function mockCtx(
 		getContextUsage: () => ({ percent: 50 }),
 		cwd: "/tmp/fake-project",
 		ui: { notify: notify ?? vi.fn() },
+		sessionManager: { getSessionId: () => sessionId ?? "test-session-id" },
 		...overrides,
 	} as unknown as ExtensionContext;
 }
@@ -74,9 +76,13 @@ function registerExtension(): {
 beforeEach(() => {
 	vi.mocked(start).mockReset().mockResolvedValue({ status: "started" });
 	vi.mocked(stop).mockReset().mockResolvedValue(undefined);
-	// Clear the global owner between tests
-	const g = globalThis as typeof globalThis & { __piBridgeOwner?: unknown };
-	delete g.__piBridgeOwner;
+	// Clear the global state between tests
+	const g = globalThis as typeof globalThis & {
+		__piBridgeOwnerSessionId?: string | null;
+		__piBridgePiMap?: Map<string, unknown>;
+	};
+	g.__piBridgeOwnerSessionId = null;
+	g.__piBridgePiMap = new Map();
 });
 
 describe("buildStartMessage", () => {
@@ -193,7 +199,7 @@ describe("extension socket lifecycle", () => {
 		const parent = registerExtension();
 		await parent.handlers.session_start(
 			{ type: "session_start", reason: "startup" },
-			mockCtx(),
+			mockCtx(undefined, undefined, "parent-session"),
 		);
 
 		// Child session (different pi instance) loads the extension
@@ -202,7 +208,7 @@ describe("extension socket lifecycle", () => {
 		// Child session shuts down with reason "quit" (as pi-subagents does)
 		await child.handlers.session_shutdown(
 			{ type: "session_shutdown", reason: "quit" },
-			mockCtx(),
+			mockCtx(undefined, undefined, "child-session"),
 		);
 
 		// Parent's socket must still be alive
@@ -263,15 +269,19 @@ describe("extension socket lifecycle", () => {
 		const first = registerExtension();
 		await first.handlers.session_start(
 			{ type: "session_start", reason: "startup" },
-			mockCtx(),
+			mockCtx(undefined, undefined, "session-1"),
 		);
 
-		// Simulate session replacement: jiti re-evaluates the module and a new
-		// extension instance registers on a fresh pi object.
+		// Simulate session replacement: first session shuts down, new one starts
+		await first.handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "new" },
+			mockCtx(undefined, undefined, "session-1"),
+		);
+
 		const second = registerExtension();
 		await second.handlers.session_start(
 			{ type: "session_start", reason: "new" },
-			mockCtx(),
+			mockCtx(undefined, undefined, "session-2"),
 		);
 
 		onMessage?.(
@@ -290,6 +300,146 @@ describe("extension socket lifecycle", () => {
 		expect(first.pi.sendUserMessage).not.toHaveBeenCalled();
 		expect(second.pi.sendUserMessage).toHaveBeenCalledWith(
 			expect.stringContaining("hello from nvim"),
+		);
+	});
+
+	it("does not overwrite active pi when a subagent session starts", async () => {
+		let onMessage: ((raw: string) => void) | undefined;
+		vi.mocked(start).mockImplementation(async (_path, cb) => {
+			onMessage ??= cb;
+			return { status: "started" };
+		});
+
+		const parent = registerExtension();
+		await parent.handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, undefined, "parent-session"),
+		);
+
+		// Subagent starts with a different session ID
+		const child = registerExtension();
+		await child.handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, undefined, "child-session"),
+		);
+
+		// Messages should still go to parent
+		onMessage?.(
+			JSON.stringify({
+				type: "prompt",
+				text: "hello",
+				context: {
+					file: new URL(import.meta.url).pathname,
+					cwd: "/tmp",
+					mode: "normal",
+					buffer_state: "saved",
+				},
+			}),
+		);
+
+		expect(parent.pi.sendUserMessage).toHaveBeenCalled();
+		expect(child.pi.sendUserMessage).not.toHaveBeenCalled();
+	});
+
+	it("preserves parent active pi when child session shuts down", async () => {
+		let onMessage: ((raw: string) => void) | undefined;
+		vi.mocked(start).mockImplementation(async (_path, cb) => {
+			onMessage ??= cb;
+			return { status: "started" };
+		});
+
+		const parent = registerExtension();
+		await parent.handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, undefined, "parent-session"),
+		);
+
+		const child = registerExtension();
+		await child.handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, undefined, "child-session"),
+		);
+
+		// Child shuts down with quit
+		await child.handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "quit" },
+			mockCtx(undefined, undefined, "child-session"),
+		);
+
+		// Parent should still be active
+		onMessage?.(
+			JSON.stringify({
+				type: "prompt",
+				text: "hello",
+				context: {
+					file: new URL(import.meta.url).pathname,
+					cwd: "/tmp",
+					mode: "normal",
+					buffer_state: "saved",
+				},
+			}),
+		);
+
+		expect(parent.pi.sendUserMessage).toHaveBeenCalled();
+		expect(stop).not.toHaveBeenCalled();
+	});
+
+	it("clears ownerSessionId on session switch", async () => {
+		const { handlers } = registerExtension();
+		await handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, undefined, "session-1"),
+		);
+		await handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "new" },
+			mockCtx(undefined, undefined, "session-1"),
+		);
+
+		// Owner should be cleared — a new session can now claim ownership
+		const g = globalThis as typeof globalThis & {
+			__piBridgeOwnerSessionId?: string | null;
+		};
+		expect(g.__piBridgeOwnerSessionId).toBeNull();
+	});
+
+	it("broadcasts error event when sendUserMessage throws", async () => {
+		let onMessage: ((raw: string) => void) | undefined;
+		vi.mocked(start).mockImplementation(async (_path, cb) => {
+			onMessage ??= cb;
+			return { status: "started" };
+		});
+
+		const { handlers, pi } = registerExtension();
+		pi.sendUserMessage.mockImplementation(() => {
+			throw new Error("This extension ctx is stale");
+		});
+
+		await handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, undefined, "test-session"),
+		);
+
+		// broadcast is mocked — check it was called with error event
+		const { broadcast } = await import("../src/socket.js");
+
+		onMessage?.(
+			JSON.stringify({
+				type: "prompt",
+				text: "hello",
+				context: {
+					file: new URL(import.meta.url).pathname,
+					cwd: "/tmp",
+					mode: "normal",
+					buffer_state: "saved",
+				},
+			}),
+		);
+
+		expect(broadcast).toHaveBeenCalledWith(
+			expect.stringContaining('"type":"error"'),
+		);
+		expect(broadcast).toHaveBeenCalledWith(
+			expect.stringContaining('"code":"stale_context"'),
 		);
 	});
 });
