@@ -9,6 +9,11 @@
 #   ./scripts/test-pi.sh /path/to/ext/dist/index.js  # + explicit path
 #   PI_BRIDGE_LOG_LEVEL=debug ./scripts/test-pi.sh
 #
+# Arguments before "--" are extension names/paths; arguments after "--" are
+# passed through to pi verbatim:
+#   ./scripts/test-pi.sh -- -c                    # continue most recent session
+#   ./scripts/test-pi.sh pi-subagents -- -c       # extension + pi flags
+#
 # Short names are resolved from ~/.pi/agent/ (npm/, git/ subdirs).
 # The extension is loaded via jiti (TypeScript on-the-fly), no build step needed.
 # After edits to src/, just restart this script.
@@ -29,8 +34,22 @@ export PI_BRIDGE_LOG_LEVEL="${PI_BRIDGE_LOG_LEVEL:-debug}"
 # Build extension args: always include local pi-bridge.ext
 EXT_ARGS=(-e "$EXT_DIR/src/index.ts")
 
-# Resolve extra extensions from arguments
+# Split args at "--": before it = extensions, after it = passthrough pi args
+EXT_INPUT=()
+PI_PASSTHROUGH=()
+seen_sep=false
 for arg in "$@"; do
+  if [[ $arg == "--" ]]; then
+    seen_sep=true
+  elif [[ $seen_sep == true ]]; then
+    PI_PASSTHROUGH+=("$arg")
+  else
+    EXT_INPUT+=("$arg")
+  fi
+done
+
+# Resolve extra extensions from arguments
+for arg in ${EXT_INPUT[@]+"${EXT_INPUT[@]}"}; do
   if [[ -f "$arg" ]]; then
     # Explicit path
     EXT_ARGS+=(-e "$arg")
@@ -70,6 +89,9 @@ for ((i=0; i<${#EXT_ARGS[@]}; i+=2)); do
 done
 echo "Log level:  $PI_BRIDGE_LOG_LEVEL"
 echo "Log file:   ~/.pi/agent/pi-bridge.log"
+if ((${#PI_PASSTHROUGH[@]})); then
+  echo "pi args:    ${PI_PASSTHROUGH[*]}"
+fi
 echo "=================================="
 
 exec pi \
@@ -78,4 +100,5 @@ exec pi \
   --no-context-files \
   --no-themes \
   --no-prompt-templates \
-  "${EXT_ARGS[@]}"
+  "${EXT_ARGS[@]}" \
+  ${PI_PASSTHROUGH[@]+"${PI_PASSTHROUGH[@]}"}
