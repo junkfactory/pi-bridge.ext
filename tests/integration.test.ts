@@ -6,12 +6,20 @@
  * correctly formatted user message.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	onTestFailed,
+	vi,
+} from "vitest";
 import { handleMessage } from "../src/handler.js";
 import index from "../src/index.js";
 import { parseMessage } from "../src/protocol.js";
@@ -24,7 +32,19 @@ beforeEach(() => {
 	tmpDir = mkdtempSync(join(tmpdir(), "pi-bridge-integration-"));
 	sockPath = join(tmpDir, "test.sock");
 	// Redirect logging to the temp dir — never touch the real ~/.pi log.
-	process.env.PI_BRIDGE_LOG_FILE = join(tmpDir, "pi-bridge.log");
+	const logFile = join(tmpDir, "pi-bridge.log");
+	process.env.PI_BRIDGE_LOG_FILE = logFile;
+	// The afterEach cleanup deletes the log even on failure; surface it in
+	// the failing test's output so it is never lost to debugging.
+	onTestFailed(() => {
+		try {
+			console.error(
+				`--- pi-bridge test log (${logFile}) ---\n${readFileSync(logFile, "utf8")}`,
+			);
+		} catch {
+			// log file may not exist if the test failed before any logging
+		}
+	});
 });
 
 afterEach(async () => {
