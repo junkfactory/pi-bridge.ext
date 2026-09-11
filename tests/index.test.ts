@@ -374,6 +374,122 @@ describe("extension socket lifecycle", () => {
 		);
 	});
 
+	it("dispatches inbound messages to the resumed session after /resume", async () => {
+		let onMessage: ((raw: string) => void) | undefined;
+		vi.mocked(start).mockImplementation(async (_path, cb) => {
+			onMessage ??= cb;
+			return { status: "started" };
+		});
+
+		const first = registerExtension();
+		const originalSession = staleableCtx("session-1");
+		await first.handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			originalSession.ctx,
+		);
+
+		// /resume: session_before_switch is a pi-internal hook the extension
+		// does not listen to; the extension sees shutdown + session_start.
+		await first.handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "resume" },
+			mockCtx(undefined, undefined, "session-1"),
+		);
+		const resumed = registerExtension();
+		await resumed.handlers.session_start(
+			{
+				type: "session_start",
+				reason: "resume",
+				previousSessionFile: "/tmp/s1.jsonl",
+			},
+			mockCtx(undefined, undefined, "session-2"),
+		);
+
+		// The original session's ctx is stale from here on.
+		originalSession.markStale();
+
+		onMessage?.(
+			JSON.stringify({
+				type: "prompt",
+				text: "hello from nvim",
+				context: {
+					file: new URL(import.meta.url).pathname,
+					cwd: "/tmp",
+					mode: "normal",
+					buffer_state: "saved",
+				},
+			}),
+		);
+
+		expect(first.pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(resumed.pi.sendUserMessage).toHaveBeenCalledWith(
+			expect.stringContaining("hello from nvim"),
+		);
+	});
+
+	it("dispatches inbound messages after consecutive /new and /resume switches", async () => {
+		// The callback is bound once at the very first session_start and must
+		// keep working across any number of subsequent session switches — each
+		// switch rebinds extensions and makes the previous ctx stale.
+		let onMessage: ((raw: string) => void) | undefined;
+		vi.mocked(start).mockImplementation(async (_path, cb) => {
+			onMessage ??= cb;
+			return { status: "started" };
+		});
+
+		const boot = registerExtension();
+		const bootSession = staleableCtx("session-1");
+		await boot.handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			bootSession.ctx,
+		);
+
+		// /new — new extension instance takes over the map entry
+		await boot.handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "new" },
+			mockCtx(undefined, undefined, "session-1"),
+		);
+		bootSession.markStale();
+		const afterNew = registerExtension();
+		await afterNew.handlers.session_start(
+			{ type: "session_start", reason: "new" },
+			mockCtx(undefined, undefined, "session-2"),
+		);
+
+		// /resume — another instance, the message must land here
+		await afterNew.handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "resume" },
+			mockCtx(undefined, undefined, "session-2"),
+		);
+		const afterResume = registerExtension();
+		await afterResume.handlers.session_start(
+			{
+				type: "session_start",
+				reason: "resume",
+				previousSessionFile: "/tmp/s2.jsonl",
+			},
+			mockCtx(undefined, undefined, "session-3"),
+		);
+
+		onMessage?.(
+			JSON.stringify({
+				type: "prompt",
+				text: "hello from nvim",
+				context: {
+					file: new URL(import.meta.url).pathname,
+					cwd: "/tmp",
+					mode: "normal",
+					buffer_state: "saved",
+				},
+			}),
+		);
+
+		expect(boot.pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(afterNew.pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(afterResume.pi.sendUserMessage).toHaveBeenCalledWith(
+			expect.stringContaining("hello from nvim"),
+		);
+	});
+
 	it("does not overwrite active pi when a subagent session starts", async () => {
 		let onMessage: ((raw: string) => void) | undefined;
 		vi.mocked(start).mockImplementation(async (_path, cb) => {
