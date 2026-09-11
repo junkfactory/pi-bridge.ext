@@ -23,8 +23,12 @@ import { broadcast, start, stop } from "./socket.js";
 /**
  * Map of ExtensionAPI instances by sessionId, shared across jiti module
  * re-evaluations. The socket's message callback outlives session replacements,
- * so it must resolve `pi` at message time — a captured old `pi` is stale after
- * ctx.newSession()/fork()/switchSession()/reload() and throws.
+ * so it must resolve `pi` at message time — a captured old `pi` or `ctx` is
+ * stale after ctx.newSession()/fork()/switchSession()/reload() and throws.
+ * The callback therefore must not close over the `ctx` passed to
+ * `session_start` either: pi may evaluate the extension factory more than
+ * once per process (e.g. rebind at startup), and whichever instance binds
+ * the socket first, its captured ctx is dead by the time messages arrive.
  *
  * Each session's `pi` is registered in the map with its sessionId. When a
  * message arrives, we look up the owner's `pi` by `ownerSessionId`. This is
@@ -156,7 +160,10 @@ export default function (pi: ExtensionAPI) {
 					warn("Received invalid message", { raw });
 					return;
 				}
-				const sid = ctx.sessionManager.getSessionId();
+				// Never touch the captured `ctx` here — it is stale after session
+				// replacement and throws. The owner session id in shared state is
+				// the live session this socket dispatches into.
+				const sid = globalScope.__piBridgeOwnerSessionId;
 				info("Inbound message", {
 					type: message.type,
 					textLength: message.text?.length ?? 0,
@@ -169,24 +176,24 @@ export default function (pi: ExtensionAPI) {
 						sessionId: sid,
 					});
 				}
-				const active = getActivePi();
-				if (!active) {
-					const code: ErrorCode = "no_active_pi";
-					error("No active extension API for inbound message", {
-						type: message.type,
-						code,
-						sessionId: sid,
-					});
-					broadcast(
-						serializeEvent({
-							type: "error",
-							message: "Failed to deliver message to pi",
-							code,
-						}),
-					);
-					return;
-				}
 				try {
+					const active = getActivePi();
+					if (!active) {
+						const code: ErrorCode = "no_active_pi";
+						error("No active extension API for inbound message", {
+							type: message.type,
+							code,
+							sessionId: sid,
+						});
+						broadcast(
+							serializeEvent({
+								type: "error",
+								message: "Failed to deliver message to pi",
+								code,
+							}),
+						);
+						return;
+					}
 					handleMessage(active, message);
 					debug("Dispatch succeeded", {
 						type: message.type,

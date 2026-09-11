@@ -46,6 +46,26 @@ function mockCtx(
 	} as unknown as ExtensionContext;
 }
 
+/** A ctx whose sessionManager throws when used after it went stale. */
+function staleableCtx(sessionId: string): {
+	ctx: ExtensionContext;
+	markStale: () => void;
+} {
+	const ctx = mockCtx(undefined, undefined, sessionId);
+	let stale = false;
+	(
+		ctx.sessionManager as unknown as { getSessionId: () => string }
+	).getSessionId = () => {
+		if (stale) {
+			throw new Error(
+				"This extension ctx is stale after session replacement or reload.",
+			);
+		}
+		return sessionId;
+	};
+	return { ctx, markStale: () => (stale = true) };
+}
+
 /** Register the extension and return its event handlers plus the pi mock. */
 function registerExtension(): {
 	handlers: Record<
@@ -258,8 +278,9 @@ describe("extension socket lifecycle", () => {
 
 	it("dispatches inbound messages to the latest extension instance after session replacement", async () => {
 		// The socket's message callback is registered by the first instance and
-		// outlives session replacement (/new, /resume...). The captured `pi` of
-		// the first instance is stale, so dispatch must resolve the latest one.
+		// outlives session replacement (/new, /resume...). The captured `pi` and
+		// `ctx` of the first instance are stale, so dispatch must resolve the
+		// latest one and never touch the captured ctx.
 		let onMessage: ((raw: string) => void) | undefined;
 		vi.mocked(start).mockImplementation(async (_path, cb) => {
 			onMessage ??= cb; // first bind wins; later instances adopt (already-hosted)
@@ -267,9 +288,10 @@ describe("extension socket lifecycle", () => {
 		});
 
 		const first = registerExtension();
+		const firstSession = staleableCtx("session-1");
 		await first.handlers.session_start(
 			{ type: "session_start", reason: "startup" },
-			mockCtx(undefined, undefined, "session-1"),
+			firstSession.ctx,
 		);
 
 		// Simulate session replacement: first session shuts down, new one starts
@@ -282,6 +304,55 @@ describe("extension socket lifecycle", () => {
 		await second.handlers.session_start(
 			{ type: "session_start", reason: "new" },
 			mockCtx(undefined, undefined, "session-2"),
+		);
+
+		// The first instance's ctx is now stale — the callback must not use it.
+		firstSession.markStale();
+
+		onMessage?.(
+			JSON.stringify({
+				type: "prompt",
+				text: "hello from nvim",
+				context: {
+					file: new URL(import.meta.url).pathname,
+					cwd: "/tmp",
+					mode: "normal",
+					buffer_state: "saved",
+				},
+			}),
+		);
+
+		expect(first.pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(second.pi.sendUserMessage).toHaveBeenCalledWith(
+			expect.stringContaining("hello from nvim"),
+		);
+	});
+
+	it("delivers messages when pi rebinds the extension at startup (same session, second instance)", async () => {
+		// Fresh `pi -c` launches evaluate the extension factory twice for the
+		// same session: instance 1 binds the socket (and its callback), instance
+		// 2 takes over the map entry and is the live runtime. The callback from
+		// instance 1 must still deliver messages — without using its stale ctx.
+		let onMessage: ((raw: string) => void) | undefined;
+		vi.mocked(start).mockImplementation(async (_path, cb) => {
+			onMessage ??= cb; // first bind wins
+			return { status: "started" };
+		});
+
+		const first = registerExtension();
+		const firstSession = staleableCtx("session-1");
+		await first.handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			firstSession.ctx,
+		);
+
+		// pi rebinds: same session id, fresh extension instance; its ctx is the
+		// live one and the stale one must never be touched.
+		firstSession.markStale();
+		const second = registerExtension();
+		await second.handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, undefined, "session-1"),
 		);
 
 		onMessage?.(
