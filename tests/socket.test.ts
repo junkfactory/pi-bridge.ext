@@ -15,6 +15,7 @@ import { broadcast, start, stop } from "../src/socket.js";
 
 vi.mock("../src/log.js", () => ({
 	LOG_PATH: "/tmp/pi-bridge-test.log",
+	logPath: () => "/tmp/pi-bridge-test.log",
 	setLogLevel: vi.fn(),
 	trace: vi.fn(),
 	debug: vi.fn(),

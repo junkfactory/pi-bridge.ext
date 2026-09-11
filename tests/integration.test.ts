@@ -23,10 +23,13 @@ let sockPath: string;
 beforeEach(() => {
 	tmpDir = mkdtempSync(join(tmpdir(), "pi-bridge-integration-"));
 	sockPath = join(tmpDir, "test.sock");
+	// Redirect logging to the temp dir — never touch the real ~/.pi log.
+	process.env.PI_BRIDGE_LOG_FILE = join(tmpDir, "pi-bridge.log");
 });
 
 afterEach(async () => {
 	await stop();
+	delete process.env.PI_BRIDGE_LOG_FILE;
 	rmSync(tmpDir, { recursive: true, force: true });
 });
 

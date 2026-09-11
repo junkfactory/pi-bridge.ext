@@ -14,7 +14,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { handleMessage } from "./handler.js";
 import type { LogLevel } from "./log.js";
-import { debug, error, info, LOG_PATH, setLogLevel, warn } from "./log.js";
+import { debug, error, info, logPath, setLogLevel, warn } from "./log.js";
 import { ensureSocketDir, socketPath } from "./path.js";
 import type { ErrorCode, OutboundEvent } from "./protocol.js";
 import { parseMessage, serializeEvent } from "./protocol.js";
@@ -140,7 +140,7 @@ export default function (pi: ExtensionAPI) {
 		info("Starting pi-bridge extension", {
 			cwd,
 			socketPath: path,
-			logPath: LOG_PATH,
+			logPath: logPath(),
 			sessionId,
 			model: ctx.model?.name,
 			reason: _event.reason,

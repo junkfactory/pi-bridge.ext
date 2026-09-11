@@ -20,6 +20,14 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 
 export const LOG_PATH = join(process.env.HOME ?? "", ".pi/agent/pi-bridge.log");
 
+/**
+ * Effective log file path: PI_BRIDGE_LOG_FILE overrides the default.
+ * Read lazily so tests and harnesses can redirect logging per run.
+ */
+export function logPath(): string {
+	return process.env.PI_BRIDGE_LOG_FILE ?? LOG_PATH;
+}
+
 let minLevel: LogLevel = "info";
 
 /** Configure the minimum log level. */
@@ -39,8 +47,9 @@ export function log(level: LogLevel, message: string, data?: unknown): void {
 			: `${prefix} ${message}\n`;
 
 	try {
-		mkdirSync(dirname(LOG_PATH), { recursive: true });
-		appendFileSync(LOG_PATH, line);
+		const path = logPath();
+		mkdirSync(dirname(path), { recursive: true });
+		appendFileSync(path, line);
 	} catch {
 		// Logging should never crash the extension
 	}
