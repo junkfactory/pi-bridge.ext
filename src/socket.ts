@@ -87,7 +87,6 @@ export async function start(
 	if (state.server) {
 		info("Socket server already running", {
 			path: state.socketPath,
-			pid: process.pid,
 		});
 		return { status: "already-hosted" };
 	}
@@ -98,7 +97,6 @@ export async function start(
 		if (alive) {
 			info("Socket already in use by another process", {
 				path,
-				pid: process.pid,
 			});
 			return { status: "foreign-owner" };
 		}
@@ -143,7 +141,7 @@ export async function start(
 		state.bindInode = null;
 	}
 
-	info("Socket server started", { path, pid: process.pid });
+	info("Socket server started", { path });
 
 	registerSignalHandlers();
 	return { status: "started" };
@@ -191,7 +189,6 @@ export async function stop(): Promise<void> {
 		if (foreignFile) {
 			info("Socket file owned by newer session; leaving in place", {
 				path,
-				pid: process.pid,
 			});
 		}
 		let displaced: string | null = null;
@@ -249,7 +246,7 @@ export async function stop(): Promise<void> {
 			}
 		}
 
-		info("Socket server stopped", { path, pid: process.pid });
+		info("Socket server stopped", { path });
 		state.server = null;
 		state.socketPath = null;
 		state.bindInode = null;

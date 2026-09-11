@@ -104,17 +104,15 @@ describe("socket lifecycle", () => {
 		expect(existsSync(sockPath)).toBe(false);
 	});
 
-	it("logs lifecycle events with the process pid", async () => {
+	it("logs lifecycle events without redundant payload pid", async () => {
 		await start(sockPath, () => {});
 		expect(info).toHaveBeenCalledWith("Socket server started", {
 			path: sockPath,
-			pid: process.pid,
 		});
 
 		await stop();
 		expect(info).toHaveBeenCalledWith("Socket server stopped", {
 			path: sockPath,
-			pid: process.pid,
 		});
 	});
 
@@ -124,7 +122,6 @@ describe("socket lifecycle", () => {
 		expect(second).toEqual({ status: "already-hosted" });
 		expect(info).toHaveBeenCalledWith("Socket server already running", {
 			path: sockPath,
-			pid: process.pid,
 		});
 	});
 
@@ -441,7 +438,7 @@ describe("shutdown with active clients", () => {
 			expect(existsSync(sockPath)).toBe(true);
 			expect(info).toHaveBeenCalledWith(
 				"Socket file owned by newer session; leaving in place",
-				{ path: sockPath, pid: process.pid },
+				{ path: sockPath },
 			);
 
 			// B still serves connections.

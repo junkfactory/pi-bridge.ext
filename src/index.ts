@@ -223,18 +223,16 @@ export default function (pi: ExtensionAPI) {
 
 			switch (result.status) {
 				case "started":
-					info("pi-bridge ready", { socketPath: path, pid: process.pid });
+					info("pi-bridge ready", { socketPath: path });
 					break;
 				case "already-hosted":
 					info("pi-bridge socket already hosted", {
 						socketPath: path,
-						pid: process.pid,
 					});
 					break;
 				case "foreign-owner":
 					warn("pi-bridge socket owned by another pi instance", {
 						socketPath: path,
-						pid: process.pid,
 					});
 					ctx.ui.notify(
 						"pi-bridge: another pi instance is running for this directory — pi-bridge not hosting this session",
@@ -299,7 +297,6 @@ export default function (pi: ExtensionAPI) {
 			}
 			info("pi-bridge socket kept across session switch", {
 				reason: event.reason,
-				pid: process.pid,
 			});
 			return;
 		}
@@ -308,12 +305,10 @@ export default function (pi: ExtensionAPI) {
 		// reason "quit" when they finish — but they must not kill the
 		// parent's socket.
 		if (sessionId !== globalScope.__piBridgeOwnerSessionId) {
-			info("pi-bridge socket kept alive — child session shutdown", {
-				pid: process.pid,
-			});
+			info("pi-bridge socket kept alive — child session shutdown");
 			return;
 		}
-		info("Shutting down pi-bridge extension", { pid: process.pid });
+		info("Shutting down pi-bridge extension");
 		globalScope.__piBridgeOwnerSessionId = null;
 		await stop();
 	});
