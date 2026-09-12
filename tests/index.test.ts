@@ -901,4 +901,3 @@ describe("extension — edit-tool system-prompt guard", () => {
 		}
 	});
 });
-
