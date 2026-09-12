@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-cd "$(dirname "$0")/../.."
-
-npm ci
-npx @biomejs/biome check .
-npx vitest run

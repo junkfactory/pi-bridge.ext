@@ -32,7 +32,9 @@ if [[ "$TAGS" =~ (^|[[:space:]])${TAG}([[:space:]]|$) ]]; then
 fi
 
 echo "==> running build checks"
-./.github/ci/build.sh
+npm ci
+npx @biomejs/biome check .
+npx vitest run
 
 if [[ -n "${DRY_RUN:-}" ]]; then
   echo "DRY_RUN: jj tag set $TAG -r main"
