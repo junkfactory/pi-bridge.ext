@@ -1,10 +1,11 @@
 import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
-	APPROVAL_HEADER,
+	APPROVAL_HINT_BELOW_EDITOR,
 	classifyDiffLine,
 	colorizeDiffLine,
 	isEscapeKey,
+	OVERLAY_HEADER,
 	renderWidgetText,
 } from "../src/ui.js";
 
@@ -69,12 +70,12 @@ describe("colorizeDiffLine", () => {
 });
 
 describe("renderWidgetText", () => {
-	it("includes the approval header followed by colorized diff lines", () => {
+	it("includes the overlay header followed by colorized diff lines", () => {
 		const theme = makeTheme();
 		const diff = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new";
 		const text = renderWidgetText(diff, theme);
 		// Header is always present somewhere.
-		expect(text).toContain(APPROVAL_HEADER);
+		expect(text).toContain(OVERLAY_HEADER);
 		// Then each diff line.
 		expect(text).toContain("-old");
 		expect(text).toContain("+new");
@@ -90,34 +91,28 @@ describe("renderWidgetText", () => {
 });
 
 // ---------------------------------------------------------------------------
-// showDiffWidget / clearDiffWidget integration with ctx.ui.setWidget
+// showApprovalHint / clearDiffWidget integration with ctx.ui.setWidget
 // ---------------------------------------------------------------------------
 
-describe("showDiffWidget / clearDiffWidget", () => {
+describe("showApprovalHint / clearDiffWidget", () => {
 	function makeCtx() {
 		const setWidget = vi.fn();
 		const ctx = { ui: { setWidget } } as unknown as Parameters<
-			typeof import("../src/ui.js").showDiffWidget
+			typeof import("../src/ui.js").showApprovalHint
 		>[0];
 		return { ctx, setWidget };
 	}
 
-	it("calls setWidget with the factory form to render a read-only diff", async () => {
-		const { showDiffWidget } = await import("../src/ui.js");
+	it("calls setWidget with the hint lines below the editor", async () => {
+		const { showApprovalHint } = await import("../src/ui.js");
 		const { ctx, setWidget } = makeCtx();
-		showDiffWidget(ctx, "+hello\n-world\n");
+		showApprovalHint(ctx);
 		expect(setWidget).toHaveBeenCalledTimes(1);
-		const [key, content] = setWidget.mock.calls[0];
-		expect(key).toBe("pi-bridge-approval");
-		expect(typeof content).toBe("function");
-		// Invoke the factory and confirm it returns a Text component with
-		// the header plus both diff lines.
-		const theme = makeTheme();
-		const component = (content as (t: unknown, th: Theme) => unknown)(
-			null,
-			theme,
+		expect(setWidget).toHaveBeenCalledWith(
+			"pi-bridge-approval",
+			[APPROVAL_HINT_BELOW_EDITOR],
+			{ placement: "belowEditor" },
 		);
-		expect(component).toBeDefined();
 	});
 
 	it("clearDiffWidget calls setWidget with undefined to remove the widget", async () => {

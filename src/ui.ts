@@ -2,11 +2,13 @@
  * TUI helpers for the edit-approval gate.
  *
  * Two surfaces:
- *   - `showDiffWidget` / `clearDiffWidget` — a read-only diff widget above
- *     the editor that the user sees while a Neovim prompt is open (and
- *     during the fallback overlay after the ack window expires).
+ *   - `showApprovalHint` / `clearDiffWidget` — a one-line hint widget
+ *     below the editor that the user sees while a Neovim prompt is open
+ *     (the diff itself is rendered by pi's built-in edit/write tool
+ *     preview in the transcript; we don't duplicate it).
  *   - `diffOverlay` — a modal `ctx.ui.custom` component with y/a/n/esc
- *     used when Neovim hasn't answered in time.
+ *     used when Neovim hasn't answered in time. The overlay still shows
+ *     the diff because pi is the decision surface there.
  *
  * Both surfaces colorize unified-diff lines using the theme's
  * `toolDiffAdded` / `toolDiffRemoved` / `toolDiffContext` tokens. The line
@@ -14,7 +16,7 @@
  *
  * Avoids importing from `@earendil-works/pi-tui` (which is not hoisted to
  * our root node_modules) by using the string-array overload of setWidget
- * for the read-only widget and a minimal inline Component for the modal
+ * for the hint widget and a minimal inline Component for the modal
  * overlay. Both are pure ANSI text under the hood.
  */
 
@@ -80,8 +82,12 @@ export function colorizeDiffLine(line: string, theme: Theme): string {
 	}
 }
 
-/** Header line shown above the diff widget. */
-export const APPROVAL_HEADER = "approve in Neovim: y / a(ll this file) / n";
+/** Header line shown above the diff overlay (pi-TUI fallback). */
+export const OVERLAY_HEADER = "approve: y / a(ll this file) / n";
+
+/** One-line hint shown below the editor while a Neovim prompt is open. */
+export const APPROVAL_HINT_BELOW_EDITOR =
+	"approve: y / a(ll this file) / n — here or in Neovim";
 
 /**
  * Match the Escape key across terminal keyboard protocols.
@@ -102,41 +108,26 @@ export function isEscapeKey(data: string): boolean {
 }
 
 /**
- * Build the rendered text for the diff widget (header + colorized diff).
+ * Build the rendered text for the diff overlay (header + colorized diff).
  * Exposed for unit testing — does not touch pi APIs.
  */
 export function renderWidgetText(diff: string, theme: Theme): string {
-	const header = theme.bold(theme.fg("accent", APPROVAL_HEADER));
+	const header = theme.bold(theme.fg("accent", OVERLAY_HEADER));
 	const lines = diff.split("\n").map((l) => colorizeDiffLine(l, theme));
 	return [header, ...lines].join("\n");
 }
 
-/**
- * Show a read-only diff widget above the editor. Cleared with
- * `clearDiffWidget(ctx)`.
- *
- * Uses the factory overload of setWidget so the widget receives the theme
- * and colorizes diff lines. The component itself is a local minimal
- * implementation — we don't import `@earendil-works/pi-tui` (which is a
- * transitive dep of pi-coding-agent and not hoisted to our root
- * node_modules).
- */
-export function showDiffWidget(ctx: ExtensionContext, diff: string): void {
-	const factory = (
-		_tui: TUI,
-		theme: Theme,
-	): Component & { dispose?(): void } => {
-		return new StaticTextComponent(renderWidgetText(diff, theme));
-	};
+/** Show a one-line approval hint below the editor. Cleared with clearDiffWidget. */
+export function showApprovalHint(ctx: ExtensionContext): void {
 	(
 		ctx.ui.setWidget as (
 			key: string,
-			content:
-				| ((tui: TUI, theme: Theme) => Component & { dispose?: () => void })
-				| undefined,
-			options?: unknown,
+			content: string[] | undefined,
+			options?: { placement?: "aboveEditor" | "belowEditor" },
 		) => void
-	)(APPROVAL_WIDGET_KEY, factory);
+	)(APPROVAL_WIDGET_KEY, [APPROVAL_HINT_BELOW_EDITOR], {
+		placement: "belowEditor",
+	});
 }
 
 /** Remove the diff widget. */

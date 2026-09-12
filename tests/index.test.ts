@@ -777,6 +777,35 @@ describe("extension — edit-approval gate", () => {
 		}
 	});
 
+	it("shows the approval hint below the editor during the approval gate", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
+				id: "req-1",
+				result: "yes",
+			});
+			const { handlers } = registerExtension();
+			const ctx = mockCtx();
+			const event = {
+				type: "tool_call",
+				toolCallId: "t1",
+				toolName: "edit",
+				input: {
+					path: new URL(import.meta.url).pathname,
+					edits: [{ oldText: "a", newText: "b" }],
+				},
+			};
+			await handlers.tool_call(event, ctx);
+			expect(ctx.ui.setWidget).toHaveBeenCalledWith(
+				"pi-bridge-approval",
+				["approve: y / a(ll this file) / n — here or in Neovim"],
+				{ placement: "belowEditor" },
+			);
+		} finally {
+			restore();
+		}
+	});
+
 	it("calls gate.settle on the fallback path with the overlay decision", async () => {
 		const { gate, restore } = installStubGate();
 		// The mock ctx must expose ui.custom that resolves with a decision.
