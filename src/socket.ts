@@ -50,6 +50,11 @@ interface SocketState {
 	/** Inode of the socket file at bind time; null when unknown. */
 	bindInode: number | null;
 	signalsRegistered: boolean;
+	/** Optional callback invoked whenever a client connection closes.
+	 *  Wired by the edit-approval gate so a disconnect while a request is
+	 *  pending triggers the fallback path. Stashed on the shared singleton
+	 *  so module re-evaluations adopt it. */
+	onDisconnect: (() => void) | null;
 }
 
 const globalScope = globalThis as typeof globalThis & {
@@ -65,9 +70,19 @@ if (!globalScope.__piBridgeSocket) {
 		stopping: null,
 		bindInode: null,
 		signalsRegistered: false,
+		onDisconnect: null,
 	};
 }
 const state: SocketState = globalScope.__piBridgeSocket;
+
+/**
+ * Register a callback to fire when any client connection closes. Replaces
+ * any previously-registered callback. Used by the edit-approval gate to
+ * release pending requests to the fallback path on disconnect.
+ */
+export function setOnDisconnect(cb: (() => void) | null): void {
+	state.onDisconnect = cb;
+}
 
 /**
  * Start listening on the given socket path.
@@ -113,7 +128,21 @@ export async function start(
 	// Create and start the server
 	const srv = createServer((conn) => {
 		state.connections.add(conn);
-		conn.once("close", () => state.connections.delete(conn));
+		conn.once("close", () => {
+			state.connections.delete(conn);
+			// Fire the onDisconnect hook only when the LAST connection is
+			// gone. Transient clients (health checks, a second nvim instance)
+			// open and close connections all the time; a pending approval
+			// must only fall back when its peer — the one that would have
+			// acked — is truly unreachable.
+			if (state.connections.size === 0) {
+				try {
+					state.onDisconnect?.();
+				} catch {
+					// Listener errors must not break the socket.
+				}
+			}
+		});
 		handleConnection(conn, onMessage);
 	});
 

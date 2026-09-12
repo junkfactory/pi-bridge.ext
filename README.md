@@ -102,12 +102,12 @@ Context is metadata only — file path, cwd, current mode, and filetype. Buffer/
 
 String indicating the buffer's save state. When present, the handler uses it to emit tailored hints instead of file links. Valid values: `"nameless"`, `"scratch"`, `"unsaved"`, `"modified"`, `"saved"`.
 
-| State | What pi sees |
-| --- | --- |
-| `saved` | Clickable file link |
-| `modified` | Hint that the file may have unsaved changes |
-| `unsaved` / `nameless` | Hint that the buffer is unsaved (no file path) |
-| `scratch` | Hint that the path is an ephemeral scratch copy |
+| State                  | What pi sees                                    |
+|------------------------|-------------------------------------------------|
+| `saved`                | Clickable file link                             |
+| `modified`             | Hint that the file may have unsaved changes     |
+| `unsaved` / `nameless` | Hint that the buffer is unsaved (no file path)  |
+| `scratch`              | Hint that the path is an ephemeral scratch copy |
 
 When `buffer_state` is absent (e.g. from an older nvim plugin), the handler falls back to checking whether the file exists on disk via `existsSync`.
 
@@ -120,12 +120,70 @@ When `buffer_state` is absent (e.g. from an older nvim plugin), the handler fall
 }
 ```
 
+### Edit Approval Gate
+
+Before pi's built-in `edit` / `write` tools modify a file, this extension shows a unified diff in pi's TUI as a read-only widget and asks Neovim to approve it. If Neovim is unavailable (no connection, no ack, old plugin), an interactive diff overlay appears in the pi TUI as a fallback.
+
+```text
+tool_call(edit|write)
+  ├─ gate: file already approved ("a")? ── yes ─► allow (return undefined)
+  ├─ compute unified diff (generateUnifiedPatch, disk file vs event.input)
+  ├─ render diff widget in pi TUI (read-only, above editor)
+  ├─ broadcast approval_request {id, path, tool, diff}
+  │    ├─ nvim renders floating prompt → sends approval_ack {id} (≤1s)
+  │    │    └─ await approval_response {id, decision} — no time limit, Esc aborts
+  │    └─ no ack in 1s (not connected / busy / old nvim / opted out)
+  │         └─ fallback: ctx.ui.custom overlay diff UI in pi TUI (y/a/n/esc)
+  ├─ yes ─► clear widget, allow
+  ├─ all ─► add path to per-file approved set, clear widget, allow
+  └─ no  ─► clear widget, return { block: true, reason: "User rejected edit to <path>" }
+```
+
+Per-file "all" decisions are remembered for the duration of the session; a fresh session re-prompts even for previously-approved files. Per-file memory is cleared on `session_start`, `session_before_switch`, and `session_shutdown`.
+
+Disabling the gate: set `PI_BRIDGE_EDIT_APPROVAL=0` before launching pi. The extension then allows every `edit` / `write` call without prompting (the original behavior).
+
+Bash bypass: the gate only sees `edit` / `write` tool calls — shell mutations (`sed -i`, redirections, …) are invisible to it. To steer the agent toward the gated tools, the extension appends a standing file-editing instruction to every turn's system prompt (`EDIT_TOOL_GUARD` in `src/index.ts`) while the gate is enabled; disabling the gate removes the instruction too.
+
+Headless / RPC modes: when `ctx.hasUI === false` (e.g. `pi -p` or JSON output), the extension auto-approves without rendering a widget — non-interactive workflows aren't blocked. In RPC mode the fallback overlay cannot render; if Neovim also doesn't answer within the 1s ack window, the edit is **blocked** as cancelled (fail-safe, never silently allowed).
+
+#### Approval protocol (NDJSON, additive)
+
+**Neovim → pi** (after the gate prompts):
+
+```json
+{ "type": "approval_ack",      "id": "<uuid>" }
+{ "type": "approval_response", "id": "<uuid>", "decision": "yes" | "all" | "no" }
+```
+
+`approval_ack` is the liveness signal — Neovim sends it within 1s of receiving `approval_request`. Once acked, the gate waits indefinitely (bounded only by Esc / agent abort) for `approval_response`. A late `approval_response` after the fallback path has already resolved is ignored.
+
+**pi → Neovim** (gate events):
+
+```json
+{ "type": "approval_request",  "id": "<uuid>", "tool": "edit" | "write", "path": "<abs>", "diff": "<unified patch>" }
+{ "type": "approval_resolved", "id": "<uuid>" }
+```
+
+`approval_resolved` is broadcast after every approval cycle (yes/all/no/cancelled/fallback) so Neovim can close any stale floating prompt that lingered past the fallback path.
+
+#### Version pairing
+
+This is a **socket protocol change**. Both repos must be tagged at the same version when shipping approval support. See [Releasing — Cross-repo pairing](#cross-repo-pairing) below.
+
 ### Key APIs Used
 
 - `pi.sendUserMessage()` — inject prompt as if typed in TUI
 - `pi.on("session_start", ...)` — open socket
 - `pi.on("session_shutdown", ...)` — close socket
 - `pi.on("agent_start/end", ...)` — push events to Neovim
+- `pi.on("tool_call", ...)` — intercept `edit` / `write` for the approval gate
+- `pi.on("session_before_switch", ...)` — reset per-file approval memory
+- `generateUnifiedPatch(path, old, new)` — diff computation (no extra dep)
+- `ctx.ui.setWidget(key, factory)` — render the diff widget
+- `ctx.ui.custom(factory, { overlay: true })` — fallback diff overlay
+- `ctx.signal` — agent abort signal; abort cancels the pending request
+- `ctx.hasUI` — gate for headless modes (auto-approve when false)
 
 ## Logging
 
@@ -149,6 +207,12 @@ PI_BRIDGE_LOG_LEVEL=debug pi -e ./src/index.ts
 ```
 
 Levels: `trace`, `debug`, `info`, `warn`, `error`.
+
+### Kill Switches
+
+- `PI_BRIDGE_LOG_LEVEL` — minimum log level (above)
+- `PI_BRIDGE_EDIT_APPROVAL=0` — disable the edit-approval gate entirely (every `edit`/`write` is allowed without prompting). The runtime kill-switch avoids a rebuild when the gate is in the way; flip back to `1` (or unset) to re-enable.
+- `PI_BRIDGE_LOG_FILE` — override the log destination (tests use this)
 
 ### Log Rotation
 
@@ -185,6 +249,8 @@ This runs `npm ci`, Biome lint, and the Vitest suite, creates a `v0.1.2` jj tag 
 ### Cross-repo pairing
 
 Both repos release independently. The exception is a **socket protocol change** — both repos are then tagged at the same version. After both releases exist, a daily CI job appends a pairing line (e.g. "Requires pi-bridge.nvim v0.1.2") to each release's notes.
+
+The edit-approval gate (see [Edit Approval Gate](#edit-approval-gate)) introduces four new message types (`approval_request`, `approval_resolved`, `approval_ack`, `approval_response`). It must ship paired with the matching pi-bridge.nvim version.
 
 ### Dry run
 

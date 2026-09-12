@@ -10,7 +10,23 @@
 // ---------------------------------------------------------------------------
 
 /** All message types Neovim can send. */
-export type InboundMessage = PromptMessage;
+export type InboundMessage =
+	| PromptMessage
+	| ApprovalAckMessage
+	| ApprovalResponseMessage;
+
+/** Acknowledgement that Neovim rendered the approval prompt. */
+export interface ApprovalAckMessage {
+	type: "approval_ack";
+	id: string;
+}
+
+/** User's decision on a pending approval request. */
+export interface ApprovalResponseMessage {
+	type: "approval_response";
+	id: string;
+	decision: "yes" | "all" | "no";
+}
 
 /** Prompt with editor context from Neovim. */
 export interface PromptMessage {
@@ -32,9 +48,43 @@ export interface PromptMessage {
 /** Error codes for error events. */
 export type ErrorCode = "stale_context" | "send_failed" | "no_active_pi";
 
+/** Decision the extension may receive back from a pi fallback overlay. */
+export type ApprovalDecision = "yes" | "all" | "no";
+
+/** Edit/write tool whose diff is awaiting approval. */
+export type ApprovalTool = "edit" | "write";
+
+/** Outbound: a diff is awaiting user approval. */
+export interface ApprovalRequestEvent {
+	type: "approval_request";
+	id: string;
+	tool: ApprovalTool;
+	path: string;
+	diff: string;
+}
+
+/** Outbound: a previously broadcast approval_request has been settled
+ *  (resolved by the user, by the pi fallback overlay, or by disconnect).
+ *  Lets Neovim close any stale floating prompt. */
+export interface ApprovalResolvedEvent {
+	type: "approval_resolved";
+	id: string;
+}
+
 /** Event pushed to Neovim. */
-export interface OutboundEvent {
-	type: "agent_start" | "agent_end" | "error";
+export type OutboundEvent =
+	| AgentLifecycleEvent
+	| ErrorEvent
+	| ApprovalRequestEvent
+	| ApprovalResolvedEvent;
+
+export interface AgentLifecycleEvent {
+	type: "agent_start" | "agent_end";
+	message: string;
+}
+
+export interface ErrorEvent {
+	type: "error";
 	message: string;
 	code?: ErrorCode;
 }
@@ -84,6 +134,10 @@ export function parseMessage(raw: string): InboundMessage | null {
 	switch (parsed.type) {
 		case "prompt":
 			return parsePromptMessage(parsed);
+		case "approval_ack":
+			return parseApprovalAckMessage(parsed);
+		case "approval_response":
+			return parseApprovalResponseMessage(parsed);
 		default:
 			return null;
 	}
@@ -134,6 +188,27 @@ function parsePromptMessage(
 	}
 
 	return { type: "prompt", text: obj.text, context };
+}
+
+function parseApprovalAckMessage(
+	obj: Record<string, unknown>,
+): ApprovalAckMessage | null {
+	if (typeof obj.id !== "string" || obj.id.length === 0) return null;
+	return { type: "approval_ack", id: obj.id };
+}
+
+function parseApprovalResponseMessage(
+	obj: Record<string, unknown>,
+): ApprovalResponseMessage | null {
+	if (typeof obj.id !== "string" || obj.id.length === 0) return null;
+	if (
+		obj.decision !== "yes" &&
+		obj.decision !== "all" &&
+		obj.decision !== "no"
+	) {
+		return null;
+	}
+	return { type: "approval_response", id: obj.id, decision: obj.decision };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

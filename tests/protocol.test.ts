@@ -193,6 +193,114 @@ describe("parseMessage", () => {
 });
 
 // ---------------------------------------------------------------------------
+// approval_ack / approval_response
+// ---------------------------------------------------------------------------
+
+describe("parseMessage (approval messages)", () => {
+	it("parses a valid approval_ack", () => {
+		const msg = parseMessage(
+			JSON.stringify({ type: "approval_ack", id: "abc-123" }),
+		);
+		expect(msg).toEqual({ type: "approval_ack", id: "abc-123" });
+	});
+
+	it("returns null for approval_ack missing id", () => {
+		expect(parseMessage(JSON.stringify({ type: "approval_ack" }))).toBeNull();
+	});
+
+	it("returns null for approval_ack with non-string id", () => {
+		expect(
+			parseMessage(JSON.stringify({ type: "approval_ack", id: 42 })),
+		).toBeNull();
+	});
+
+	it("returns null for approval_ack with empty id", () => {
+		expect(
+			parseMessage(JSON.stringify({ type: "approval_ack", id: "" })),
+		).toBeNull();
+	});
+
+	it("parses a valid approval_response for each decision", () => {
+		for (const decision of ["yes", "all", "no"] as const) {
+			const msg = parseMessage(
+				JSON.stringify({ type: "approval_response", id: "x", decision }),
+			);
+			expect(msg).toEqual({ type: "approval_response", id: "x", decision });
+		}
+	});
+
+	it("returns null for approval_response missing id", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({ type: "approval_response", decision: "yes" }),
+			),
+		).toBeNull();
+	});
+
+	it("returns null for approval_response with non-string id", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({ type: "approval_response", id: 0, decision: "yes" }),
+			),
+		).toBeNull();
+	});
+
+	it("returns null for approval_response with empty id", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({ type: "approval_response", id: "", decision: "yes" }),
+			),
+		).toBeNull();
+	});
+
+	it("returns null for approval_response with unknown decision", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({
+					type: "approval_response",
+					id: "x",
+					decision: "maybe",
+				}),
+			),
+		).toBeNull();
+		expect(
+			parseMessage(
+				JSON.stringify({ type: "approval_response", id: "x", decision: 1 }),
+			),
+		).toBeNull();
+	});
+
+	it("returns null for approval_response missing decision", () => {
+		expect(
+			parseMessage(JSON.stringify({ type: "approval_response", id: "x" })),
+		).toBeNull();
+	});
+});
+
+describe("serializeEvent (approval events)", () => {
+	it("serializes approval_request and approval_resolved", () => {
+		const req = {
+			type: "approval_request" as const,
+			id: "abc",
+			tool: "edit" as const,
+			path: "/tmp/foo.ts",
+			diff: "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n",
+		};
+		const raw = serializeEvent(req);
+		expect(raw.endsWith(FRAME_DELIMITER)).toBe(true);
+		expect(JSON.parse(raw.trim())).toEqual(req);
+
+		const res = {
+			type: "approval_resolved" as const,
+			id: "abc",
+		};
+		const raw2 = serializeEvent(res);
+		expect(raw2.endsWith(FRAME_DELIMITER)).toBe(true);
+		expect(JSON.parse(raw2.trim())).toEqual(res);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // serializeEvent
 // ---------------------------------------------------------------------------
 

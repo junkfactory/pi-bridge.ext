@@ -41,8 +41,14 @@ function mockCtx(
 		thinkingLevel: "medium",
 		getContextUsage: () => ({ percent: 50 }),
 		cwd: "/tmp/fake-project",
-		ui: { notify: notify ?? vi.fn() },
+		hasUI: true,
+		ui: {
+			notify: notify ?? vi.fn(),
+			setWidget: vi.fn(),
+			custom: vi.fn(),
+		},
 		sessionManager: { getSessionId: () => sessionId ?? "test-session-id" },
+		signal: undefined,
 		...overrides,
 	} as unknown as ExtensionContext;
 }
@@ -631,3 +637,268 @@ describe("extension socket lifecycle", () => {
 		);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Edit-approval gate
+// ---------------------------------------------------------------------------
+
+import type { Gate } from "../src/approval.js";
+
+const gateGlobal = globalThis as typeof globalThis & {
+	__piBridgeGate?: Gate | null;
+};
+
+function installStubGate(): { gate: Gate; restore: () => void } {
+	const gate = {
+		requestApproval: vi.fn(),
+		handleAck: vi.fn(),
+		handleResponse: vi.fn(),
+		settle: vi.fn(),
+		handleDisconnect: vi.fn(),
+		reset: vi.fn(),
+	} as unknown as Gate;
+	const prev = gateGlobal.__piBridgeGate;
+	gateGlobal.__piBridgeGate = gate;
+	return { gate, restore: () => (gateGlobal.__piBridgeGate = prev ?? null) };
+}
+
+describe("extension — edit-approval gate", () => {
+	it("auto-approves when !ctx.hasUI (headless)", async () => {
+		const { handlers } = registerExtension();
+		const ctx = mockCtx();
+		ctx.hasUI = false;
+		const event = {
+			type: "tool_call",
+			toolCallId: "t1",
+			toolName: "edit",
+			input: { path: "/tmp/x.ts", edits: [{ oldText: "a", newText: "b" }] },
+		};
+		const result = await handlers.tool_call(event, ctx);
+		expect(result).toBeUndefined();
+	});
+
+	it("returns undefined (allow) for non-edit/write tools", async () => {
+		const { handlers } = registerExtension();
+		const event = {
+			type: "tool_call",
+			toolCallId: "t1",
+			toolName: "bash",
+			input: { command: "ls" },
+		};
+		const result = await handlers.tool_call(event, mockCtx());
+		expect(result).toBeUndefined();
+	});
+
+	it("auto-approves an edit with no meaningful preview (no edits, no file)", async () => {
+		const { handlers } = registerExtension();
+		// Path that doesn't exist + empty edits → buildDiff returns null → no preview → allow
+		const event = {
+			type: "tool_call",
+			toolCallId: "t1",
+			toolName: "edit",
+			input: { path: "/tmp/__definitely_does_not_exist__/ghost.ts", edits: [] },
+		};
+		const result = await handlers.tool_call(event, mockCtx());
+		expect(result).toBeUndefined();
+	});
+
+	it("PI_BRIDGE_EDIT_APPROVAL=0 disables the gate entirely", async () => {
+		const prev = process.env.PI_BRIDGE_EDIT_APPROVAL;
+		process.env.PI_BRIDGE_EDIT_APPROVAL = "0";
+		try {
+			const { handlers } = registerExtension();
+			const event = {
+				type: "tool_call",
+				toolCallId: "t1",
+				toolName: "edit",
+				input: {
+					path: new URL(import.meta.url).pathname,
+					edits: [{ oldText: "a", newText: "b" }],
+				},
+			};
+			const result = await handlers.tool_call(event, mockCtx());
+			expect(result).toBeUndefined();
+		} finally {
+			process.env.PI_BRIDGE_EDIT_APPROVAL = prev;
+		}
+	});
+
+	it("blocks with a reason when the gate resolves to 'no'", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
+				id: "req-1",
+				result: "no",
+			});
+			const { handlers } = registerExtension();
+			const event = {
+				type: "tool_call",
+				toolCallId: "t1",
+				toolName: "edit",
+				input: {
+					path: new URL(import.meta.url).pathname,
+					edits: [{ oldText: "a", newText: "b" }],
+				},
+			};
+			const result = await handlers.tool_call(event, mockCtx());
+			expect(result).toEqual({
+				block: true,
+				reason: expect.stringContaining("User rejected edit to"),
+			});
+		} finally {
+			restore();
+		}
+	});
+
+	it("blocks with 'Edit approval cancelled' when the gate resolves to 'cancelled'", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
+				id: "req-1",
+				result: "cancelled",
+			});
+			const { handlers } = registerExtension();
+			const event = {
+				type: "tool_call",
+				toolCallId: "t1",
+				toolName: "edit",
+				input: {
+					path: new URL(import.meta.url).pathname,
+					edits: [{ oldText: "a", newText: "b" }],
+				},
+			};
+			const result = await handlers.tool_call(event, mockCtx());
+			expect(result).toEqual({
+				block: true,
+				reason: "Edit approval cancelled",
+			});
+		} finally {
+			restore();
+		}
+	});
+
+	it("calls gate.settle on the fallback path with the overlay decision", async () => {
+		const { gate, restore } = installStubGate();
+		// The mock ctx must expose ui.custom that resolves with a decision.
+		const mockCtxWithOverlay = () => {
+			const ctx = mockCtx();
+			ctx.ui = {
+				...ctx.ui,
+				custom: vi.fn().mockResolvedValue("yes"),
+				setWidget: vi.fn(),
+			} as unknown as typeof ctx.ui;
+			return ctx;
+		};
+		try {
+			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
+				id: "req-1",
+				result: "fallback",
+			});
+			const { handlers } = registerExtension();
+			const event = {
+				type: "tool_call",
+				toolCallId: "t1",
+				toolName: "edit",
+				input: {
+					path: new URL(import.meta.url).pathname,
+					edits: [{ oldText: "a", newText: "b" }],
+				},
+			};
+			const result = await handlers.tool_call(event, mockCtxWithOverlay());
+			expect(gate.settle).toHaveBeenCalledWith(
+				"req-1",
+				"yes",
+				expect.stringContaining("index.test.ts"),
+			);
+			expect(result).toBeUndefined();
+		} finally {
+			restore();
+		}
+	});
+
+	it("blocks as cancelled when the fallback overlay cannot run (RPC mode returns undefined)", async () => {
+		const { gate, restore } = installStubGate();
+		const ctxRpcOverlay = () => {
+			const ctx = mockCtx();
+			ctx.ui = {
+				...ctx.ui,
+				custom: vi.fn().mockResolvedValue(undefined),
+				setWidget: vi.fn(),
+			} as unknown as typeof ctx.ui;
+			return ctx;
+		};
+		try {
+			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
+				id: "req-1",
+				result: "fallback",
+			});
+			const { handlers } = registerExtension();
+			const event = {
+				type: "tool_call",
+				toolCallId: "t1",
+				toolName: "edit",
+				input: {
+					path: new URL(import.meta.url).pathname,
+					edits: [{ oldText: "a", newText: "b" }],
+				},
+			};
+			const result = await handlers.tool_call(event, ctxRpcOverlay());
+			expect(result).toEqual({
+				block: true,
+				reason: "Edit approval cancelled",
+			});
+			// No decision was made, so per-file memory must not be updated.
+			expect(gate.settle).not.toHaveBeenCalled();
+		} finally {
+			restore();
+		}
+	});
+
+	it("resets the gate on session_start", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			const { handlers } = registerExtension();
+			await handlers.session_start(
+				{ type: "session_start", reason: "startup" },
+				mockCtx(),
+			);
+			expect(gate.reset).toHaveBeenCalled();
+		} finally {
+			restore();
+		}
+	});
+});
+
+describe("extension — edit-tool system-prompt guard", () => {
+	it("appends the file-editing guard to every turn's system prompt", async () => {
+		const { handlers } = registerExtension();
+		const event = {
+			type: "before_agent_start",
+			prompt: "do a thing",
+			systemPrompt: "BASE PROMPT",
+		};
+		const result = await handlers.before_agent_start(event, mockCtx());
+		expect(result).toEqual({
+			systemPrompt: expect.stringMatching(/^BASE PROMPT\n\n/),
+		});
+		expect((result as { systemPrompt: string }).systemPrompt).toContain(
+			"edit` and `write` tools",
+		);
+	});
+
+	it("injects nothing when the approval gate is disabled", async () => {
+		const prev = process.env.PI_BRIDGE_EDIT_APPROVAL;
+		process.env.PI_BRIDGE_EDIT_APPROVAL = "0";
+		try {
+			const { handlers } = registerExtension();
+			const result = await handlers.before_agent_start(
+				{ type: "before_agent_start", prompt: "x", systemPrompt: "BASE" },
+				mockCtx(),
+			);
+			expect(result).toBeUndefined();
+		} finally {
+			process.env.PI_BRIDGE_EDIT_APPROVAL = prev;
+		}
+	});
+});
+

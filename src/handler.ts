@@ -8,7 +8,26 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { InboundMessage, PromptMessage } from "./protocol.js";
+import type { Gate } from "./approval.js";
+import type {
+	ApprovalDecision,
+	InboundMessage,
+	PromptMessage,
+} from "./protocol.js";
+
+/**
+ * Shared globalThis state for the approval gate. Mirrors the pattern in
+ * `src/index.ts` (singleton pi map) and `src/socket.ts` (singleton server
+ * state) — jiti may re-evaluate this module on session switch / reload,
+ * so any per-process singleton must live on `globalThis` to survive.
+ */
+const globalScope = globalThis as typeof globalThis & {
+	__piBridgeGate?: Gate | null;
+};
+
+function getGate(): Gate | null {
+	return globalScope.__piBridgeGate ?? null;
+}
 
 /**
  * Handle a parsed message from Neovim.
@@ -19,7 +38,25 @@ export function handleMessage(pi: ExtensionAPI, message: InboundMessage): void {
 		case "prompt":
 			handlePrompt(pi, message);
 			break;
+		case "approval_ack":
+			handleApprovalAck(message.id);
+			break;
+		case "approval_response":
+			handleApprovalResponse(message.id, message.decision);
+			break;
 	}
+}
+
+function handleApprovalAck(id: string): void {
+	const gate = getGate();
+	if (!gate) return; // gate not installed yet (early message)
+	gate.handleAck(id);
+}
+
+function handleApprovalResponse(id: string, decision: ApprovalDecision): void {
+	const gate = getGate();
+	if (!gate) return;
+	gate.handleResponse(id, decision);
 }
 
 /**

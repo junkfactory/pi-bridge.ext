@@ -4,21 +4,48 @@
  * Pi extension for Neovim integration via Unix socket.
  * Opens a socket on session start, listens for messages from
  * pi-bridge.nvim, and injects them into the pi session.
+ *
+ * Also implements the edit-approval gate: before pi's built-in `edit` and
+ * `write` tools modify a file, a diff preview is shown in the pi TUI and
+ * approval is requested via the bridge socket (Neovim) — falling back to
+ * an interactive pi-TUI overlay after a 1s ack window when Neovim is
+ * unavailable. Disable via `PI_BRIDGE_EDIT_APPROVAL=0`.
  */
+
+/**
+ * Standing system-prompt instruction steering the agent away from shell
+ * file mutations (which the approval gate cannot see) toward the gated
+ * edit/write tools. Appended to every turn's system prompt by the
+ * `before_agent_start` handler while the gate is enabled.
+ */
+export const EDIT_TOOL_GUARD = [
+	"File-editing policy: apply all file changes with the `edit` and `write` tools.",
+	"Never modify files through bash — no `sed -i`, `perl -i`, `tee`, output redirection",
+	"(> / >>), `mv`/`cp` overwrites, heredocs into files, or scripts that write files.",
+	"edit/write calls show a diff preview for user approval; shell mutations bypass it.",
+].join("\n");
 
 import { basename } from "node:path";
 import type {
 	AgentEndEvent,
+	BeforeAgentStartEventResult,
+	EditToolCallEvent,
 	ExtensionAPI,
 	ExtensionContext,
+	ToolCallEventResult,
+	WriteToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { createGate, type Gate } from "./approval.js";
+import { buildDiff } from "./diff.js";
 import { handleMessage } from "./handler.js";
 import type { LogLevel } from "./log.js";
 import { debug, error, info, logPath, setLogLevel, warn } from "./log.js";
 import { ensureSocketDir, socketPath } from "./path.js";
 import type { ErrorCode, OutboundEvent } from "./protocol.js";
 import { parseMessage, serializeEvent } from "./protocol.js";
-import { broadcast, start, stop } from "./socket.js";
+import { broadcast, setOnDisconnect, start, stop } from "./socket.js";
+import { clearDiffWidget, diffOverlay, showDiffWidget } from "./ui.js";
 
 /**
  * Map of ExtensionAPI instances by sessionId, shared across jiti module
@@ -43,6 +70,7 @@ import { broadcast, start, stop } from "./socket.js";
 const globalScope = globalThis as typeof globalThis & {
 	__piBridgePiMap?: Map<string, ExtensionAPI>;
 	__piBridgeOwnerSessionId?: string | null;
+	__piBridgeGate?: Gate | null;
 };
 
 function getPiMap(): Map<string, ExtensionAPI> {
@@ -56,6 +84,38 @@ function getActivePi(): ExtensionAPI | null {
 	const ownerSessionId = globalScope.__piBridgeOwnerSessionId;
 	if (!ownerSessionId) return null;
 	return getPiMap().get(ownerSessionId) ?? null;
+}
+
+/**
+ * Shared singleton approval gate. Stored on globalThis so module reloads
+ * (jiti evaluates the extension factory more than once per process) adopt
+ * the live gate instead of leaving orphan instances hanging on the socket
+ * state.
+ */
+function getGate(): Gate {
+	if (!globalScope.__piBridgeGate) {
+		globalScope.__piBridgeGate = createGate({
+			broadcast: (data) => broadcast(data),
+			onResolved: (id) => {
+				// Tell Neovim the request is settled so any stale float
+				// (prompt shown after the fallback path resolved) can close.
+				broadcast(serializeEvent({ type: "approval_resolved", id }));
+			},
+		});
+		// Wire socket disconnects to the gate so a half-open prompt
+		// falls back to the pi overlay rather than hanging.
+		setOnDisconnect(() => {
+			globalScope.__piBridgeGate?.handleDisconnect();
+		});
+	}
+	return globalScope.__piBridgeGate;
+}
+
+/** Reset and re-install the gate (used by session lifecycle hooks). */
+function resetGate(): void {
+	if (globalScope.__piBridgeGate) {
+		globalScope.__piBridgeGate.reset();
+	}
 }
 
 export function buildStartMessage(ctx: ExtensionContext): string {
@@ -132,6 +192,10 @@ export default function (pi: ExtensionAPI) {
 	setLogLevel(level);
 
 	pi.on("session_start", async (_event, ctx) => {
+		// Edit-approval gate: clear per-file "all" memory at session start
+		// so a new session re-prompts even for previously-approved files.
+		resetGate();
+
 		const cwd = ctx.cwd ?? process.cwd();
 		const path = socketPath(cwd);
 
@@ -166,10 +230,10 @@ export default function (pi: ExtensionAPI) {
 				const sid = globalScope.__piBridgeOwnerSessionId;
 				info("Inbound message", {
 					type: message.type,
-					textLength: message.text?.length ?? 0,
+					textLength: message.type === "prompt" ? message.text.length : 0,
 					sessionId: sid,
 				});
-				if (message.text) {
+				if (message.type === "prompt" && message.text) {
 					const preview = message.text.slice(0, 50);
 					debug("Inbound message preview", {
 						preview,
@@ -247,6 +311,135 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	// -----------------------------------------------------------------
+	// Edit-approval gate: intercept edit/write tool calls, show the
+	// user a diff in the pi TUI, ask Neovim to approve, and fall back
+	// to an interactive pi-TUI overlay if Neovim is unavailable.
+	//
+	// The gate only sees edit/write; agents can still mutate files via
+	// bash (sed -i, redirects, ...). Policing shell commands is
+	// whack-a-mole, so instead every turn's system prompt carries a
+	// standing instruction to use the gated tools (see EDIT_TOOL_GUARD).
+	// -----------------------------------------------------------------
+	pi.on(
+		"before_agent_start",
+		(event): BeforeAgentStartEventResult | undefined => {
+			// Same kill-switch as the gate itself.
+			if (process.env.PI_BRIDGE_EDIT_APPROVAL === "0") return undefined;
+			return {
+				systemPrompt: `${event.systemPrompt}\n\n${EDIT_TOOL_GUARD}`,
+			};
+		},
+	);
+
+	pi.on(
+		"tool_call",
+		async (event, ctx): Promise<ToolCallEventResult | undefined> => {
+			// Kill-switch (env var disables the whole gate without a rebuild).
+			if (process.env.PI_BRIDGE_EDIT_APPROVAL === "0") return undefined;
+
+			// Narrow to edit / write. Other tools (bash, read, ...) are
+			// deliberately untouched — only file mutations gate on approval.
+			const isEdit = isToolCallEventType("edit", event);
+			const isWrite = isToolCallEventType("write", event);
+			if (!isEdit && !isWrite) return undefined;
+
+			// Headless (print / JSON / RPC) runs have no UI to ask on — auto-
+			// approve so non-interactive workflows aren't blocked.
+			if (!ctx.hasUI) {
+				info("Edit-approval gate: auto-approve (no UI)", {
+					tool: isEdit ? "edit" : "write",
+					path: (event as EditToolCallEvent | WriteToolCallEvent).input.path,
+				});
+				return undefined;
+			}
+
+			const toolName = isEdit ? "edit" : "write";
+			const toolEvent = event as EditToolCallEvent | WriteToolCallEvent;
+			const input = toolEvent.input as Parameters<typeof buildDiff>[1];
+			const cwd = ctx.cwd ?? process.cwd();
+
+			const diffResult = await buildDiff(toolName, input, cwd);
+			if (!diffResult) {
+				// Nothing meaningful to preview (e.g. an edit with no edits and
+				// no existing file). Let the tool run — it will fail upstream
+				// on its own if needed.
+				return undefined;
+			}
+
+			const gate = getGate();
+
+			// Show the diff widget above the editor (the fallback overlay
+			// will paint on top of it when triggered).
+			showDiffWidget(ctx, diffResult.diff);
+
+			let requestId = "";
+			try {
+				const outcome = await gate.requestApproval({
+					tool: toolName,
+					path: diffResult.path,
+					diff: diffResult.diff,
+					signal: ctx.signal,
+				});
+				requestId = outcome.id;
+				let decision = outcome.result;
+
+				if (decision === "fallback") {
+					info("Edit-approval gate: pi-TUI fallback overlay", {
+						path: diffResult.path,
+						tool: toolName,
+					});
+					// In RPC mode ctx.ui.custom() returns undefined — treat that
+					// as a cancelled request (block) rather than falling through
+					// the decision switch and silently allowing the edit.
+					const overlayDecision = await diffOverlay(ctx, diffResult.diff);
+					if (overlayDecision === undefined) {
+						decision = "cancelled";
+					} else {
+						decision = overlayDecision;
+						gate.settle(requestId, decision, diffResult.path);
+					}
+				}
+
+				// Map the decision to a tool_call result.
+				switch (decision) {
+					case "yes":
+					case "all":
+						info("Edit-approval gate: approved", {
+							path: diffResult.path,
+							tool: toolName,
+							decision,
+						});
+						return undefined;
+					case "no":
+						info("Edit-approval gate: rejected", {
+							path: diffResult.path,
+							tool: toolName,
+						});
+						return {
+							block: true,
+							reason: `User rejected edit to ${diffResult.path}`,
+						};
+					case "cancelled":
+						info("Edit-approval gate: cancelled", {
+							path: diffResult.path,
+							tool: toolName,
+						});
+						return { block: true, reason: "Edit approval cancelled" };
+				}
+			} finally {
+				// Always clear the widget and broadcast approval_resolved so
+				// Neovim can close any stale float, even if the agent aborted.
+				clearDiffWidget(ctx);
+				if (requestId) {
+					broadcast(
+						serializeEvent({ type: "approval_resolved", id: requestId }),
+					);
+				}
+			}
+		},
+	);
+
 	pi.on("agent_start", (_event, ctx) => {
 		const cwd = ctx.cwd ?? process.cwd();
 		const sessionId = ctx.sessionManager.getSessionId();
@@ -278,6 +471,19 @@ export default function (pi: ExtensionAPI) {
 		});
 		broadcast(serializeEvent(event));
 	});
+
+	// -----------------------------------------------------------------
+	// Edit-approval gate: clear per-file "all" memory at session
+	// boundaries so a fresh session re-prompts even for files the
+	// previous session had approved. Hooks ride alongside the existing
+	// session lifecycle handlers — don't replace them.
+	// -----------------------------------------------------------------
+	pi.on("session_before_switch", () => {
+		resetGate();
+	});
+	// No reset on session_shutdown: session switches tear down via
+	// session_before_switch + the next session_start, and we want in-flight
+	// requests to settle first on a real quit.
 
 	pi.on("session_shutdown", async (event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();

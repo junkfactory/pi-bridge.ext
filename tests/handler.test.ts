@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleMessage } from "../src/handler.js";
-import type { PromptMessage } from "../src/protocol.js";
+import type {
+	ApprovalAckMessage,
+	ApprovalResponseMessage,
+	PromptMessage,
+} from "../src/protocol.js";
 
 function mockPi() {
 	return {
@@ -205,5 +209,82 @@ describe("handleMessage", () => {
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 		const sent = pi.sendUserMessage.mock.calls[0][0] as string;
 		expect(sent).toContain("does not exist on disk");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Approval ack / response routing
+// ---------------------------------------------------------------------------
+
+/**
+ * A gate is reachable via globalThis on the bridge side (see `src/handler.ts`).
+ * Tests install a stub there before exercising `handleMessage`.
+ */
+import type { Gate } from "../src/approval.js";
+
+const globalScope = globalThis as typeof globalThis & {
+	__piBridgeGate?: Gate | null;
+};
+
+function installGate(): { gate: Gate; restore: () => void } {
+	const gate = {
+		requestApproval: vi.fn(),
+		handleAck: vi.fn(),
+		handleResponse: vi.fn(),
+		settle: vi.fn(),
+		handleDisconnect: vi.fn(),
+		reset: vi.fn(),
+	} as unknown as Gate;
+	const prev = globalScope.__piBridgeGate;
+	globalScope.__piBridgeGate = gate;
+	return { gate, restore: () => (globalScope.__piBridgeGate = prev ?? null) };
+}
+
+describe("handleMessage — approval messages", () => {
+	it("routes approval_ack to gate.handleAck", () => {
+		const { gate, restore } = installGate();
+		try {
+			const msg: ApprovalAckMessage = { type: "approval_ack", id: "abc" };
+			handleMessage(mockPi(), msg);
+			expect(gate.handleAck).toHaveBeenCalledWith("abc");
+			expect(gate.handleResponse).not.toHaveBeenCalled();
+		} finally {
+			restore();
+		}
+	});
+
+	it("routes approval_response to gate.handleResponse with the decision", () => {
+		const { gate, restore } = installGate();
+		try {
+			const msg: ApprovalResponseMessage = {
+				type: "approval_response",
+				id: "xyz",
+				decision: "all",
+			};
+			handleMessage(mockPi(), msg);
+			expect(gate.handleResponse).toHaveBeenCalledWith("xyz", "all");
+			expect(gate.handleAck).not.toHaveBeenCalled();
+		} finally {
+			restore();
+		}
+	});
+
+	it("is a noop when no gate is installed (early message)", () => {
+		const prev = globalScope.__piBridgeGate;
+		globalScope.__piBridgeGate = null;
+		try {
+			expect(() =>
+				handleMessage(mockPi(), { type: "approval_ack", id: "x" }),
+			).not.toThrow();
+			expect(() =>
+				handleMessage(mockPi(), {
+					type: "approval_response",
+					id: "x",
+					decision: "yes",
+				}),
+			).not.toThrow();
+		} finally {
+			globalScope.__piBridgeGate = prev ?? null;
+		}
 	});
 });
