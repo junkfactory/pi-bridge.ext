@@ -123,19 +123,27 @@ export function isEscapeKey(data: string): boolean {
 }
 
 /**
- * Show the approval prompt and return a handle for it.
+ * Shared first-wins / remote-dismissal machinery for the two pi-side
+ * prompts (`promptSelection`, `promptOptions`). Owns: the settle-decision
+ * promise + `once()` guard, the wrapped-done (pi's `done` isn't documented
+ * as idempotent), the non-TUI fail-safe, and the `dismiss()` teardown.
+ * Callers supply the component factory and T's "cancelled" sentinel.
  *
- * Replaces pi's input box with our focused component (no overlay), so the
- * editor is hidden for the duration of the prompt. pi restores the editor
- * when pi's `done()` is called — either by a keypress or by `dismiss()`.
+ * Returns a handle whose `decision` resolves with the user's keypress
+ * (or the cancelled sentinel when dismissed programmatically or in
+ * non-TUI modes); `dismiss()` closes the prompt remotely.
  */
-export function promptSelection(ctx: ExtensionContext): PromptHandle {
-	let settleDecision!: (d: PromptDecision) => void;
-	const decision = new Promise<PromptDecision>((resolve) => {
+function promptWithHandle<T>(
+	ctx: ExtensionContext,
+	cancelled: T,
+	build: (tui: unknown, theme: Theme, done: (d: T) => void) => ComponentLike,
+): { decision: Promise<T>; dismiss: () => void } {
+	let settleDecision!: (d: T) => void;
+	const decision = new Promise<T>((resolve) => {
 		settleDecision = resolve;
 	});
 	let settled = false;
-	const once = (d: PromptDecision) => {
+	const once = (d: T) => {
 		if (settled) return;
 		settled = true;
 		settleDecision(d);
@@ -145,30 +153,23 @@ export function promptSelection(ctx: ExtensionContext): PromptHandle {
 	// down when the user never presses a key. `uiSettled` guards against
 	// calling it twice (keypress race) — pi's done is not documented as
 	// idempotent.
-	let uiDone: ((d: PromptDecision) => void) | undefined;
+	let uiDone: ((d: T) => void) | undefined;
 	let uiSettled = false;
 
-	const uiPromise = ctx.ui.custom<PromptDecision>(
+	const uiPromise = ctx.ui.custom<T>(
 		(tui, theme, _keybindings, rawDone) => {
 			uiDone = rawDone;
-			const done = (d: PromptDecision) => {
+			const done = (d: T) => {
 				if (uiSettled) return;
 				uiSettled = true;
 				rawDone(d);
 			};
-			const component = new ApprovalPromptComponent(tui, theme);
-			component.handleInput = (data: string) => {
-				if (data === "y") done("yes");
-				else if (data === "a") done("all");
-				else if (data === "n") done("no");
-				else if (isEscapeKey(data)) done("cancelled");
-			};
-			return component;
+			return build(tui, theme, done);
 		},
 	);
 	// Keypress path: forward pi's resolution (undefined in non-TUI modes →
 	// fail-safe "cancelled").
-	void uiPromise.then((r) => once(r ?? "cancelled"));
+	void uiPromise.then((r) => once(r ?? cancelled));
 
 	return {
 		decision,
@@ -179,16 +180,36 @@ export function promptSelection(ctx: ExtensionContext): PromptHandle {
 				// through uiPromise, so a keypress racing this microtask still
 				// wins (once() keeps the first answer).
 				uiSettled = true;
-				uiDone("cancelled");
+				uiDone(cancelled);
 				return;
 			}
 			if (!uiDone) {
 				// Non-TUI mode or the factory hasn't run yet — no component to
 				// tear down; settle the decision directly.
-				once("cancelled");
+				once(cancelled);
 			}
 		},
 	};
+}
+
+/**
+ * Show the approval prompt and return a handle for it.
+ *
+ * Replaces pi's input box with our focused component (no overlay), so the
+ * editor is hidden for the duration of the prompt. pi restores the editor
+ * when pi's `done()` is called — either by a keypress or by `dismiss()`.
+ */
+export function promptSelection(ctx: ExtensionContext): PromptHandle {
+	return promptWithHandle<PromptDecision>(ctx, "cancelled", (tui, theme, done) => {
+		const component = new ApprovalPromptComponent(tui, theme);
+		component.handleInput = (data: string) => {
+			if (data === "y") done("yes");
+			else if (data === "a") done("all");
+			else if (data === "n") done("no");
+			else if (isEscapeKey(data)) done("cancelled");
+		};
+		return component;
+	});
 }
 
 /**
@@ -265,64 +286,22 @@ export function promptOptions(
 	title: string,
 	options: readonly string[],
 ): PromptOptionsHandle {
-	let settleDecision!: (d: OptionsDecision) => void;
-	const decision = new Promise<OptionsDecision>((resolve) => {
-		settleDecision = resolve;
-	});
-	let settled = false;
-	const once = (d: OptionsDecision) => {
-		if (settled) return;
-		settled = true;
-		settleDecision(d);
-	};
-
-	let uiDone: ((d: OptionsDecision) => void) | undefined;
-	let uiSettled = false;
-
-	const uiPromise = ctx.ui.custom<OptionsDecision>(
-		(tui, theme, _keybindings, rawDone) => {
-			uiDone = rawDone;
-			const done = (d: OptionsDecision) => {
-				if (uiSettled) return;
-				uiSettled = true;
-				rawDone(d);
-			};
-			const component = new OptionsPromptComponent(tui, theme, title, options);
-			component.handleInput = (data: string) => {
-				if (isEscapeKey(data)) {
-					done("cancelled");
-					return;
-				}
-				// Digit keys 1..9 select options[n-1]. Anything else is a
-				// no-op (the user might be mid-typing a different intent).
-				if (data.length === 1 && data >= "1" && data <= "9") {
-					const idx = Number.parseInt(data, 10) - 1;
-					if (idx >= 0 && idx < options.length) {
-						done({ label: options[idx] ?? "" });
-					}
-				}
-			};
-			return component;
-		},
-	);
-	void uiPromise.then((r) => once(r ?? "cancelled"));
-
-	return {
-		decision,
-		dismiss: () => {
-			if (uiDone && !uiSettled) {
-				// Mirror of `promptSelection`: tear it down through pi's
-				// done so the editor is restored; the decision flows back
-				// through uiPromise. once() keeps the first answer.
-				uiSettled = true;
-				uiDone("cancelled");
+	return promptWithHandle<OptionsDecision>(ctx, "cancelled", (tui, theme, done) => {
+		const component = new OptionsPromptComponent(tui, theme, title, options);
+		component.handleInput = (data: string) => {
+			if (isEscapeKey(data)) {
+				done("cancelled");
 				return;
 			}
-			if (!uiDone) {
-				// Non-TUI mode or factory hasn't run — no component; settle
-				// the decision directly.
-				once("cancelled");
+			// Digit keys 1..9 select options[n-1]. Anything else is a
+			// no-op (the user might be mid-typing a different intent).
+			if (data.length === 1 && data >= "1" && data <= "9") {
+				const idx = Number.parseInt(data, 10) - 1;
+				if (idx >= 0 && idx < options.length) {
+					done({ label: options[idx] ?? "" });
+				}
 			}
-		},
-	};
+		};
+		return component;
+	});
 }

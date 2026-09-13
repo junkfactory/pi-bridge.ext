@@ -27,6 +27,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { serializeEvent } from "./protocol.js";
 import { broadcast } from "./socket.js";
 import { getNvimTurnActive } from "./turn.js";
 import { isEscapeKey, type PromptOptionsHandle, promptOptions } from "./ui.js";
@@ -237,7 +238,7 @@ export function createMirror(opts: CreateMirrorOptions): Mirror {
 
 	const broadcastResolved = (id: string) => {
 		try {
-			emit(`${JSON.stringify({ type: "ui_prompt_resolved", id })}\n`);
+			emit(serializeEvent({ type: "ui_prompt_resolved", id }));
 		} catch {
 			// Broadcast failures must not strand the race; the caller
 			// already settled via the gate's first-wins guard.
@@ -314,13 +315,13 @@ export function createMirror(opts: CreateMirrorOptions): Mirror {
 		// in a defensive try and treat as cancelled.
 		try {
 			emit(
-				`${JSON.stringify({
+				serializeEvent({
 					type: "ui_prompt_request",
 					id,
 					kind,
 					title,
 					options: [...options],
-				})}\n`,
+				}),
 			);
 		} catch (_err) {
 			// Broadcast failed — settle as cancelled so the caller isn't
@@ -508,12 +509,12 @@ export function createMirror(opts: CreateMirrorOptions): Mirror {
 			component.render = (width: number): string[] => {
 				const lines = origRender(width);
 				if (disabled) return lines;
-				const payload = `${JSON.stringify({
+				const payload = serializeEvent({
 					type: "ui_prompt_request",
 					id,
 					kind: "custom",
 					lines,
-				})}\n`;
+				});
 				if (firstRender) {
 					firstRender = false;
 					lastLines = lines.join("\n");

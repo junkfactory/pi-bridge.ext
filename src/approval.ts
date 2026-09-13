@@ -26,7 +26,11 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { ApprovalDecision, ApprovalTool } from "./protocol.js";
+import {
+	type ApprovalDecision,
+	type ApprovalTool,
+	serializeEvent,
+} from "./protocol.js";
 
 export interface RequestApprovalArgs {
 	tool: ApprovalTool;
@@ -188,13 +192,13 @@ export function createGate(opts: CreateGateOptions): Gate {
 			// with `approval_response` (decision). There's no ack window —
 			// either side's answer is first-wins.
 			broadcast(
-				`${JSON.stringify({
+				serializeEvent({
 					type: "approval_request",
 					id,
 					tool: args.tool,
 					path: args.path,
 					diff: args.diff,
-				})}\n`,
+				}),
 			);
 
 			// Watch the abort signal: if the agent turn is aborted while the
