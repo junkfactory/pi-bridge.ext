@@ -45,7 +45,7 @@ import { ensureSocketDir, socketPath } from "./path.js";
 import type { ErrorCode, OutboundEvent } from "./protocol.js";
 import { parseMessage, serializeEvent } from "./protocol.js";
 import { broadcast, setOnDisconnect, start, stop } from "./socket.js";
-import { clearDiffWidget, diffOverlay, showDiffWidget } from "./ui.js";
+import { clearDiffWidget, diffOverlay, showApprovalHint } from "./ui.js";
 
 /**
  * Map of ExtensionAPI instances by sessionId, shared across jiti module
@@ -369,9 +369,11 @@ export default function (pi: ExtensionAPI) {
 
 			const gate = getGate();
 
-			// Show the diff widget above the editor (the fallback overlay
-			// will paint on top of it when triggered).
-			showDiffWidget(ctx, diffResult.diff);
+			// Show a one-line approval hint below the editor. The diff
+			// itself is already rendered by pi's built-in edit/write tool
+			// preview in the transcript — we don't duplicate it. The
+			// fallback overlay paints its own diff when it triggers.
+			showApprovalHint(ctx);
 
 			let requestId = "";
 			try {
