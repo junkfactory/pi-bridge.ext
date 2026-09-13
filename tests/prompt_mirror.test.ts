@@ -693,6 +693,46 @@ describe("Mirror — custom pass-through", () => {
 		(ui as unknown as Record<string, unknown>)[GATE_PROMPT_KEY] = false;
 	});
 
+	it("runCustom falls through when not in an nvim turn (pi-typed dialog)", async () => {
+		// Regression: runCustom never checked isActive(), so custom
+		// dialogs were mirrored on pi-typed turns too (origin scoping
+		// never applied to the custom path — found live in C1).
+		setMirrorReady(true);
+		setNvimTurnActive(false);
+		const bc = makeBroadcast();
+		const mirror = createMirror({ broadcast: bc.emit });
+		const { ui } = makeUiWithCapturedCustom();
+		const ctx = makeCtx(ui);
+
+		const dialogComponent = makeMirrorableComponent(["dialog"]);
+		const originalCustom = vi.fn(
+			async (
+				factory: (
+					tui: unknown,
+					theme: unknown,
+					keybindings: unknown,
+					done: (decision: unknown) => void,
+				) => unknown,
+			) => {
+				const result = (await factory(
+					{},
+					makeTheme(),
+					{},
+					() => {},
+				)) as MirrorComponent;
+				expect(result).toBe(dialogComponent);
+				return result;
+			},
+		);
+
+		await mirror.runCustom(
+			ctx,
+			vi.fn(() => dialogComponent as MirrorComponent),
+			originalCustom as unknown as Parameters<typeof mirror.runCustom>[2],
+		);
+		expect(bc.events).toHaveLength(0);
+	});
+
 	it("async user factory is awaited before feature-detect", async () => {
 		setMirrorReady(true);
 		setNvimTurnActive(true);
@@ -774,6 +814,10 @@ describe("Mirror — custom capture & injection", () => {
 		const mirror = createMirror({ broadcast: bc.emit });
 		const { ui } = makeUiWithCapturedCustom();
 		const ctx = makeCtx(ui);
+		// runCustom gates on active() like runSelect/runConfirm — arm the
+		// mirror for these capture-path tests.
+		setMirrorReady(true);
+		setNvimTurnActive(true);
 
 		const originalCustom = vi.fn(
 			async (

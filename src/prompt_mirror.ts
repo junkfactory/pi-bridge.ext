@@ -424,6 +424,13 @@ export function createMirror(opts: CreateMirrorOptions): Mirror {
 		) => Promise<T>,
 		options?: { overlay?: boolean },
 	): Promise<T> => {
+		// Same active() gate as runSelect/runConfirm: env kill switch,
+		// mirror-ready, and nvim-originated turn. Without this, custom
+		// dialogs were mirrored on EVERY turn — including pi-typed ones
+		// (origin scoping never applied to the custom path).
+		if (!isActive()) {
+			return original(userFactory, options);
+		}
 		// The edit-approval gate's own prompt calls ctx.ui.custom on this
 		// same ui object — pass it through untouched. The gate has its
 		// own nvim surface (approval_request); mirroring it would stack a
