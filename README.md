@@ -185,7 +185,7 @@ This is a **socket protocol change**. Both repos must be tagged at the same vers
 
 ### UI Prompt Mirror
 
-The mirror intercepts `ctx.ui.select`, `ctx.ui.confirm`, and `ctx.ui.custom` for any pi extension during Neovim-originated turns. The prompt is mirrored to Neovim (a `vim.ui.select` picker for select/confirm, a floating window + key forwarding for custom `ctx.ui.custom` components such as pi-permission-system's permission dialog); both surfaces race the same underlying decision, first answer wins.
+The mirror intercepts `ctx.ui.select`, `ctx.ui.confirm`, and `ctx.ui.custom` for any pi extension during Neovim-originated turns. The prompt is mirrored to Neovim (a `vim.ui.select` picker for select/confirm, a passive "pi needs your input" notice for custom `ctx.ui.custom` components such as pi-permission-system's permission dialog); both surfaces race the same underlying decision, first answer wins.
 
 Turns typed directly into pi auto-pass-through (no mirror, no stall) — the mirror is origin-scoped exactly like the edit gate. The origin flag is set by the inbound `prompt` handler, cleared on `agent_end`, and dropped on every session boundary (`session_start` / `session_before_switch` / `session_shutdown`).
 
@@ -198,7 +198,7 @@ ctx.ui.select / ctx.ui.confirm / ctx.ui.custom
   ├─ nvim-originated turn? ── no ─► original untouched
   ├─ broadcast ui_prompt_request {id, kind, title|lines}
   ├─ race two surfaces:
-  │   ├─ nvim: vim.ui.select (select/confirm) or float + key forward (custom)
+  │   ├─ nvim: vim.ui.select (select/confirm) or passive notice (custom)
   │   └─ pi: ctx.ui.custom dismissable component (select/confirm) or the
   │          real terminal dialog (custom) — answers reach the component's
   │          own done() / handleInput()
@@ -241,7 +241,8 @@ Components without `render` or `handleInput`: the custom wrapper feature-detects
 { "type": "ui_prompt_response", "id": "<uuid>",
   "cancelled": true }              // picker was dismissed (Esc / close)
 { "type": "ui_prompt_response", "id": "<uuid>",
-  "key": "<raw bytes>" }           // custom-mirror keypress injection
+  "key": "<raw bytes>" }           // custom-mirror Esc abort (nvim Esc →
+                                   // component's own Esc handler)
 ```
 
 `ui_prompt_response` carries exactly one of `value` / `cancelled` / `key`; the protocol layer rejects messages that set none or more than one.
@@ -259,7 +260,9 @@ Components without `render` or `handleInput`: the custom wrapper feature-detects
 { "type": "ui_prompt_resolved", "id": "<uuid>" }
 ```
 
-`title` and `options` are absent on `custom` requests; `lines` is absent on `select` / `confirm`. ANSI may be present in `lines`; the nvim side strips SGR escape codes before rendering. `ui_prompt_resolved` is broadcast exactly once on every resolution path (nvim answer, pi answer, remote dismissal, session reset) so nvim can close its surface even when the user answered in pi.
+`title` and `options` are absent on `custom` requests; `lines` is absent on `select` / `confirm`. ANSI may be present in `lines` (kept in the payload for protocol completeness; the nvim side renders a fixed message-only notice, not the lines). `ui_prompt_resolved` is broadcast exactly once on every resolution path (nvim answer, pi answer, remote dismissal, session reset) so nvim can close its surface even when the user answered in pi.
+
+Custom prompts are display-only on the nvim side: pi's dialog is the only interactive surface. The nvim notice is dismissed by `ui_prompt_resolved`, or — if the user presses `<Esc>` on the notice — the ext injects a raw Esc byte into the pi-side component (`handleInput("\x1b")`), letting the component's own Esc handler decide what abort means (e.g. deny for pi-permission-system). No other key is ever forwarded.
 
 #### Mirror version pairing
 
