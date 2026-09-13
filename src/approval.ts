@@ -5,21 +5,24 @@
  *   - Per-file approval memory (path → remembered "a" decisions).
  *   - Queue serialization so two concurrent tool calls don't fight over
  *     one prompt (parallel tool execution is the common case).
- *   - Ack window: if Neovim hasn't acked within `ackTimeoutMs`, the caller
- *     is told to fall back to the pi TUI overlay.
- *   - First resolution wins (ack-then-response, or fallback); late events
- *     for unknown/settled ids are ignored.
+ *   - First resolution wins (response); late events for unknown/settled
+ *     ids are ignored.
  *
  * The gate itself does not touch any pi UI; `requestApproval` returns one
- * of the strings below and the caller drives the widget/overlay:
+ * of the strings below and the caller drives the prompt:
  *
- *   - "yes"      — Neovim approved this single tool call.
- *   - "all"      — Neovim approved this and all future edits to `path`.
- *   - "no"       — Neovim rejected; block the tool call.
- *   - "cancelled" — the agent turn was aborted (signal); block the tool call.
- *   - "fallback" — no ack in time, or the socket disconnected; the caller
- *                  should run the pi TUI overlay and feed its decision back
- *                  through `settle()`.
+ *   - "yes"      — Neovim (or the pi prompt) approved this single tool call.
+ *   - "all"      — Neovim (or the pi prompt) approved this and all future
+ *                  edits to `path`.
+ *   - "no"       — rejected; block the tool call.
+ *   - "cancelled" — the user pressed Esc in the pi prompt; block the tool call.
+ *
+ * There is no longer a "fallback" decision or an ack-timer window. If
+ * Neovim disconnects mid-request, the pending request is left alone —
+ * the pi-side prompt stays open awaiting the user's answer (per the
+ * agreed design). The pi prompt is the canonical decision surface once
+ * the request is in flight; nvim's response and the pi keypress race
+ * against each other under first-wins.
  */
 
 import { randomUUID } from "node:crypto";
@@ -30,9 +33,16 @@ export interface RequestApprovalArgs {
 	path: string;
 	diff: string;
 	signal: AbortSignal | undefined;
+	/**
+	 * Optional pre-generated request id. When provided, the gate uses it
+	 * instead of generating its own UUID. Callers that need synchronous
+	 * access to the id (to feed pi-prompt decisions back into the gate
+	 * while the request is still pending) should generate the id here.
+	 */
+	id?: string;
 }
 
-export type ApprovalResult = ApprovalDecision | "cancelled" | "fallback";
+export type ApprovalResult = ApprovalDecision | "cancelled";
 
 /**
  * A pending approval request. One of these exists at a time; subsequent
@@ -42,19 +52,15 @@ interface Pending {
 	id: string;
 	path: string;
 	resolve: (r: ApprovalResult) => void;
-	/** Set when an ack has been received; resolution moves to response-only. */
-	acked: boolean;
 }
 
 export interface CreateGateOptions {
 	/** Write a serialized event to all connected clients. */
 	broadcast: (data: string) => void;
-	/** Window to wait for an `approval_ack` before falling back. */
-	ackTimeoutMs?: number;
 	/**
-	 * Called when the request has been settled (response, fallback, or
-	 * disconnect) and the caller may want to broadcast an `approval_resolved`.
-	 * The id is provided so the caller can include it in the resolved event.
+	 * Called when the request has been settled (response, or session
+	 * reset). The id is provided so the caller can include it in the
+	 * `approval_resolved` broadcast.
 	 */
 	onResolved?: (id: string) => void;
 }
@@ -67,20 +73,17 @@ export interface ApprovalRequestOutcome {
 export interface Gate {
 	/**
 	 * Enqueue an approval request. Resolves to the result plus the
-	 * request id (which the caller needs to broadcast approval_resolved
-	 * and to feed back the fallback overlay's decision through settle()).
+	 * request id (which the caller needs to broadcast `approval_resolved`).
 	 */
 	requestApproval(args: RequestApprovalArgs): Promise<ApprovalRequestOutcome>;
 	handleAck(id: string): void;
 	handleResponse(id: string, decision: ApprovalDecision): void;
 	/**
-	 * Settle a fallback-path request that the caller has finalized itself
-	 * (e.g. via the pi TUI overlay). Updates the per-file "all" memory
-	 * regardless of whether the live pending entry still exists — the id
-	 * is paired with the path so the call has effect after the pending
-	 * entry is already cleared by the fallback path.
+	 * Resolve a pending request as cancelled (e.g. the user pressed Esc
+	 * in the pi-side prompt). Distinct from `handleResponse` because the
+	 * wire protocol doesn't carry "cancelled" — it carries yes/all/no only.
 	 */
-	settle(id: string, decision: ApprovalDecision, path: string): void;
+	handleCancel(id: string): void;
 	handleDisconnect(): void;
 	reset(): void;
 }
@@ -91,7 +94,7 @@ export interface Gate {
  * adopt the live one — same pattern as the socket state in `src/socket.ts`.
  */
 export function createGate(opts: CreateGateOptions): Gate {
-	const { broadcast, ackTimeoutMs = 1000, onResolved } = opts;
+	const { broadcast, onResolved } = opts;
 
 	/** Per-file "a" memory. Cleared by `reset()`. */
 	const approvedFiles = new Set<string>();
@@ -105,12 +108,6 @@ export function createGate(opts: CreateGateOptions): Gate {
 	 * can't surface a stale prompt in the new session.
 	 */
 	let generation = 0;
-	/**
-	 * Map from request id → path, retained after the pending entry clears
-	 * so `settle()` can still find the path for late ack→response→settle
-	 * sequences. Cleared by `reset()`.
-	 */
-	const idToPath = new Map<string, string>();
 
 	const fireResolved = (id: string) => {
 		try {
@@ -167,39 +164,29 @@ export function createGate(opts: CreateGateOptions): Gate {
 				return;
 			}
 
-			const id = randomUUID();
-			// Declare timer/abort handler up front so the pending resolver
-			// closure can reference them without a TDZ trap.
-			let ackTimer: ReturnType<typeof setTimeout> | undefined;
+			const id = args.id ?? randomUUID();
 			let onAbort: (() => void) | undefined;
 
 			let resolved = false;
-			idToPath.set(id, args.path);
 			const pendingEntry: Pending = {
 				id,
 				path: args.path,
 				resolve: (r) => {
 					if (resolved) return;
 					resolved = true;
-					if (ackTimer) clearTimeout(ackTimer);
 					if (onAbort && args.signal) {
 						args.signal.removeEventListener("abort", onAbort);
 					}
 					if (pending === pendingEntry) pending = null;
-					// The path is captured by the caller's closure (`settle`
-					// receives it explicitly), so the id→path entry can be
-					// dropped now to keep the map bounded within a session.
-					idToPath.delete(id);
 					fireResolved(id);
 					resolveOuter({ id, result: r });
 				},
-				acked: false,
 			};
 			pending = pendingEntry;
 
 			// Broadcast the request immediately. The Neovim side answers
-			// with `approval_ack` (liveness) and `approval_response`
-			// (decision).
+			// with `approval_response` (decision). There's no ack window —
+			// either side's answer is first-wins.
 			broadcast(
 				`${JSON.stringify({
 					type: "approval_request",
@@ -210,17 +197,9 @@ export function createGate(opts: CreateGateOptions): Gate {
 				})}\n`,
 			);
 
-			// Ack window: if no ack arrives in time, we go to the fallback
-			// path. After ack, the wait is open-ended (bounded only by the
-			// agent's own abort signal).
-			ackTimer = setTimeout(() => {
-				if (!pendingEntry.acked && pending === pendingEntry) {
-					pendingEntry.resolve("fallback");
-				}
-			}, ackTimeoutMs);
-
-			// Watch the abort signal: if the user hits Esc during a
-			// tool_call wait, the agent aborts and we resolve as cancelled.
+			// Watch the abort signal: if the agent turn is aborted while the
+			// prompt is up (e.g. Ctrl+C), cancel the pending request so the
+			// tool call resolves instead of hanging.
 			onAbort = () => pendingEntry.resolve("cancelled");
 			if (args.signal && !args.signal.aborted) {
 				args.signal.addEventListener("abort", onAbort, { once: true });
@@ -232,8 +211,11 @@ export function createGate(opts: CreateGateOptions): Gate {
 		});
 	}
 
-	const handleAck = (id: string) => {
-		if (pending?.id === id) pending.acked = true;
+	const handleAck = (_id: string) => {
+		// No-op kept for compatibility: nvim still sends approval_ack for
+		// older-pi compat. The gate no longer needs it — there's no ack
+		// window — but we accept the message so the protocol stays
+		// forward-compatible.
 	};
 
 	const handleResponse = (id: string, decision: ApprovalDecision) => {
@@ -244,22 +226,16 @@ export function createGate(opts: CreateGateOptions): Gate {
 		pending.resolve(decision);
 	};
 
-	const settle = (id: string, decision: ApprovalDecision, path: string) => {
-		// `settle` is the public name for "the caller has finalized the
-		// decision through the pi TUI overlay". The gate has already
-		// released its pending entry; we just update per-file memory for
-		// "all" decisions.
-		if (decision === "all") {
-			const knownPath = idToPath.get(id) ?? path;
-			approvedFiles.add(knownPath);
-		}
+	const handleCancel = (id: string) => {
+		if (pending?.id !== id) return; // late or unknown id; first wins
+		pending.resolve("cancelled");
 	};
 
 	const handleDisconnect = () => {
-		if (!pending) return;
-		// A request was in flight (acked or not). Release the caller to the
-		// fallback path; a reconnect may decide differently on a new request.
-		pending.resolve("fallback");
+		// Per the agreed design: a nvim disconnect mid-request must NOT
+		// resolve the pending request. The pi-side prompt stays open and
+		// the user's answer (or Esc / Ctrl+C) is the only path forward.
+		// Log only.
 	};
 
 	const reset = () => {
@@ -269,7 +245,6 @@ export function createGate(opts: CreateGateOptions): Gate {
 		// promise chain don't hang across session boundaries.
 		if (pending) pending.resolve("cancelled");
 		pending = null;
-		idToPath.clear();
 		// A fresh chain so a stale rejection from a previous session can't
 		// influence future requests.
 		queueTail = Promise.resolve();
@@ -279,7 +254,7 @@ export function createGate(opts: CreateGateOptions): Gate {
 		requestApproval,
 		handleAck,
 		handleResponse,
-		settle,
+		handleCancel,
 		handleDisconnect,
 		reset,
 	};

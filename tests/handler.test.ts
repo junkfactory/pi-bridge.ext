@@ -231,7 +231,7 @@ function installGate(): { gate: Gate; restore: () => void } {
 		requestApproval: vi.fn(),
 		handleAck: vi.fn(),
 		handleResponse: vi.fn(),
-		settle: vi.fn(),
+		handleCancel: vi.fn(),
 		handleDisconnect: vi.fn(),
 		reset: vi.fn(),
 	} as unknown as Gate;

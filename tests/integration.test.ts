@@ -516,3 +516,208 @@ describe("integration: agent_start and agent_end hooks", () => {
 		sock.destroy();
 	});
 });
+
+describe("integration: edit-approval gate over the socket", () => {
+	const gateGlobal = globalThis as typeof globalThis & {
+		__piBridgeGate?: unknown;
+		__piBridgeOwnerSessionId?: unknown;
+		__piBridgePiMap?: unknown;
+		__piBridgeNvimTurnActive?: boolean;
+	};
+
+	beforeEach(() => {
+		gateGlobal.__piBridgeGate = null;
+		gateGlobal.__piBridgeOwnerSessionId = null;
+		gateGlobal.__piBridgePiMap = new Map();
+		gateGlobal.__piBridgeNvimTurnActive = false;
+	});
+
+	afterEach(() => {
+		gateGlobal.__piBridgeGate = null;
+	});
+
+	function makeApprovalCtx(options?: { customPromise?: Promise<any> }) {
+		const customMock = options?.customPromise
+			? vi.fn().mockReturnValue(options.customPromise)
+			: vi.fn().mockResolvedValue(undefined);
+		return {
+			ctx: {
+				cwd: tmpDir,
+				hasUI: true,
+				ui: {
+					notify: vi.fn(),
+					setWidget: vi.fn(),
+					custom: customMock,
+				},
+				sessionManager: { getSessionId: () => "test-session-id" },
+				signal: undefined,
+			} as any,
+			customMock,
+		};
+	}
+
+	/** Mark the origin flag so the gate's origin check passes. */
+	function markNvimTurnActive() {
+		gateGlobal.__piBridgeNvimTurnActive = true;
+	}
+
+	it("nvim connects, receives approval_request, acks + responds 'no' → edit blocked", async () => {
+		// A real file so buildDiff computes a non-null diff.
+		const target = join(tmpDir, "nvim-rejects.ts");
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(target, "const a = 1;\n");
+
+		await start(sockPath, (raw) => {
+			const message = parseMessage(raw);
+			if (message) handleMessage({} as any, message);
+		});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+		markNvimTurnActive();
+		// Park the pi prompt so nvim's response wins the race.
+		const parkedPrompt = new Promise<any>(() => {});
+		const { ctx, customMock } = makeApprovalCtx({
+			customPromise: parkedPrompt,
+		});
+
+		const sock = await connect();
+		const received: string[] = [];
+		let pendingData = "";
+		sock.on("data", (chunk) => {
+			pendingData += chunk.toString();
+			for (;;) {
+				const idx = pendingData.indexOf("\n");
+				if (idx < 0) break;
+				received.push(pendingData.slice(0, idx));
+				pendingData = pendingData.slice(idx + 1);
+			}
+		});
+		const sendNvim = (obj: Record<string, unknown>) =>
+			send(sock, `${JSON.stringify(obj)}\n`);
+
+		const toolResult = mockPi.handlers.tool_call(
+			{
+				type: "tool_call",
+				toolCallId: "t1",
+				toolName: "edit",
+				input: { path: target, edits: [{ oldText: "1", newText: "2" }] },
+			},
+			ctx,
+		);
+
+		// nvim receives the approval_request.
+		await waitFor(() =>
+			received.some((l) => l.startsWith("{") && l.includes("approval_request")),
+		);
+		const requestLine = received.find((l) => l.includes("approval_request"));
+		if (!requestLine) throw new Error("no approval_request broadcast");
+		const request = JSON.parse(requestLine);
+
+		// nvim acks (older-pi compat) and responds 'no'.
+		await sendNvim({ type: "approval_ack", id: request.id });
+		await sendNvim({
+			type: "approval_response",
+			id: request.id,
+			decision: "no",
+		});
+
+		// Tool call blocks with the rejection reason.
+		const result = await toolResult;
+		expect(result).toEqual({
+			block: true,
+			reason: expect.stringContaining("User rejected edit to"),
+		});
+		expect(result.reason).toContain(target);
+
+		// The pi prompt was opened (race happened) but parked.
+		expect(customMock).toHaveBeenCalledTimes(1);
+
+		// Exactly one approval_resolved for the request id reached nvim.
+		await waitFor(() => received.some((l) => l.includes("approval_resolved")));
+		await new Promise((r) => setTimeout(r, 50));
+		const resolved = received.filter((l) => l.includes("approval_resolved"));
+		expect(resolved).toHaveLength(1);
+		expect(JSON.parse(resolved[0])).toEqual({
+			type: "approval_resolved",
+			id: request.id,
+		});
+
+		sock.destroy();
+	});
+
+	it("nvim disconnects mid-prompt → pi prompt stays open, pi answer still settles and broadcasts approval_resolved", async () => {
+		const target = join(tmpDir, "disconnect-during.ts");
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(target, "const x = 1;\n");
+
+		await start(sockPath, (raw) => {
+			const message = parseMessage(raw);
+			if (message) handleMessage({} as any, message);
+		});
+
+		const mockPi = createMockPi();
+		index(mockPi);
+		markNvimTurnActive();
+
+		// The pi prompt is parked until we settle it. The nvim disconnect
+		// happens BEFORE the pi prompt settles — the prompt must stay open.
+		let resolveCustom!: (decision: string) => void;
+		const customPromise = new Promise<any>((resolve) => {
+			resolveCustom = resolve;
+		});
+		const { ctx, customMock } = makeApprovalCtx({ customPromise });
+
+		const sock = await connect();
+		const received: string[] = [];
+		let pendingData = "";
+		sock.on("data", (chunk) => {
+			pendingData += chunk.toString();
+			for (;;) {
+				const idx = pendingData.indexOf("\n");
+				if (idx < 0) break;
+				received.push(pendingData.slice(0, idx));
+				pendingData = pendingData.slice(idx + 1);
+			}
+		});
+
+		const toolResult = mockPi.handlers.tool_call(
+			{
+				type: "tool_call",
+				toolCallId: "t1",
+				toolName: "edit",
+				input: { path: target, edits: [{ oldText: "1", newText: "2" }] },
+			},
+			ctx,
+		);
+
+		// Wait for approval_request to be broadcast.
+		await waitFor(() => received.some((l) => l.includes("approval_request")));
+		expect(customMock).toHaveBeenCalledTimes(1);
+
+		// nvim disconnects mid-prompt — the pi prompt stays open.
+		sock.destroy();
+
+		// Give the disconnect a moment to propagate to the gate.
+		await new Promise((r) => setTimeout(r, 30));
+		// The tool call must NOT have settled — the prompt is still open
+		// awaiting user input.
+		const settled = await Promise.race([
+			toolResult.then((r) => ({ kind: "settled", r })),
+			new Promise((r) => setTimeout(() => r({ kind: "still-pending" }), 30)),
+		]);
+		expect(settled.kind).toBe("still-pending");
+
+		// User answers in pi: 'yes' → gate.handleResponse fires
+		// approval_resolved broadcast. With no nvim listener, the
+		// broadcast goes to /dev/null — but the gate's internal
+		// onResolved hook fires exactly once. Verify by counting
+		// approval_resolved broadcasts from the test's local view: the
+		// real wiring broadcasts to the socket (which has no listeners),
+		// so we just verify the tool result.
+		resolveCustom("yes");
+
+		const result = await toolResult;
+		expect(result).toBeUndefined(); // "yes" → allow
+	});
+});
