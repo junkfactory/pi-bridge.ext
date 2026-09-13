@@ -301,6 +301,248 @@ describe("serializeEvent (approval events)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// mirror_ready
+// ---------------------------------------------------------------------------
+
+describe("parseMessage (mirror_ready)", () => {
+	it("parses a valid mirror_ready", () => {
+		const msg = parseMessage(JSON.stringify({ type: "mirror_ready" }));
+		expect(msg).toEqual({ type: "mirror_ready" });
+	});
+});
+
+// ---------------------------------------------------------------------------
+// ui_prompt_response
+// ---------------------------------------------------------------------------
+
+describe("parseMessage (ui_prompt_response)", () => {
+	it("parses a response with value", () => {
+		const msg = parseMessage(
+			JSON.stringify({
+				type: "ui_prompt_response",
+				id: "abc",
+				value: "Yes",
+			}),
+		);
+		expect(msg).toEqual({
+			type: "ui_prompt_response",
+			id: "abc",
+			value: "Yes",
+		});
+	});
+
+	it("parses a response with cancelled", () => {
+		const msg = parseMessage(
+			JSON.stringify({
+				type: "ui_prompt_response",
+				id: "abc",
+				cancelled: true,
+			}),
+		);
+		expect(msg).toEqual({
+			type: "ui_prompt_response",
+			id: "abc",
+			cancelled: true,
+		});
+	});
+
+	it("parses a response with key", () => {
+		const msg = parseMessage(
+			JSON.stringify({
+				type: "ui_prompt_response",
+				id: "abc",
+				key: "y",
+			}),
+		);
+		expect(msg).toEqual({ type: "ui_prompt_response", id: "abc", key: "y" });
+	});
+
+	it("returns null for ui_prompt_response missing id", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({ type: "ui_prompt_response", value: "Yes" }),
+			),
+		).toBeNull();
+	});
+
+	it("returns null for ui_prompt_response with empty id", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({ type: "ui_prompt_response", id: "", value: "Yes" }),
+			),
+		).toBeNull();
+	});
+
+	it("returns null for ui_prompt_response with non-string id", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({ type: "ui_prompt_response", id: 1, value: "Yes" }),
+			),
+		).toBeNull();
+	});
+
+	it("returns null when none of value/cancelled/key is set", () => {
+		expect(
+			parseMessage(JSON.stringify({ type: "ui_prompt_response", id: "abc" })),
+		).toBeNull();
+	});
+
+	it("returns null when value and cancelled are both set", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({
+					type: "ui_prompt_response",
+					id: "abc",
+					value: "Yes",
+					cancelled: true,
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("returns null when value and key are both set", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({
+					type: "ui_prompt_response",
+					id: "abc",
+					value: "Yes",
+					key: "y",
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("returns null when cancelled and key are both set", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({
+					type: "ui_prompt_response",
+					id: "abc",
+					cancelled: true,
+					key: "y",
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("returns null when all three are set", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({
+					type: "ui_prompt_response",
+					id: "abc",
+					value: "Yes",
+					cancelled: true,
+					key: "y",
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("returns null when value is non-string", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({
+					type: "ui_prompt_response",
+					id: "abc",
+					value: 42,
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("returns null when cancelled is non-boolean", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({
+					type: "ui_prompt_response",
+					id: "abc",
+					cancelled: "yes",
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("returns null when key is non-string", () => {
+		expect(
+			parseMessage(
+				JSON.stringify({
+					type: "ui_prompt_response",
+					id: "abc",
+					key: 1,
+				}),
+			),
+		).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// ui_prompt_request / ui_prompt_resolved (outbound events)
+// ---------------------------------------------------------------------------
+
+describe("serializeEvent (ui_prompt events)", () => {
+	it("serializes ui_prompt_request with select kind", () => {
+		const req = {
+			type: "ui_prompt_request" as const,
+			id: "abc",
+			kind: "select" as const,
+			title: "Pick one",
+			options: ["Yes", "No"],
+		};
+		const raw = serializeEvent(req);
+		expect(raw.endsWith(FRAME_DELIMITER)).toBe(true);
+		expect(JSON.parse(raw.trim())).toEqual(req);
+	});
+
+	it("serializes ui_prompt_request with confirm kind", () => {
+		const req = {
+			type: "ui_prompt_request" as const,
+			id: "abc",
+			kind: "confirm" as const,
+			title: "Proceed?",
+			options: ["Yes", "No"],
+		};
+		const raw = serializeEvent(req);
+		expect(raw.endsWith(FRAME_DELIMITER)).toBe(true);
+		expect(JSON.parse(raw.trim())).toEqual(req);
+	});
+
+	it("serializes ui_prompt_request with custom kind", () => {
+		const req = {
+			type: "ui_prompt_request" as const,
+			id: "abc",
+			kind: "custom" as const,
+			lines: ["hello", "world"],
+		};
+		const raw = serializeEvent(req);
+		expect(raw.endsWith(FRAME_DELIMITER)).toBe(true);
+		expect(JSON.parse(raw.trim())).toEqual(req);
+	});
+
+	it("serializes ui_prompt_resolved", () => {
+		const res = { type: "ui_prompt_resolved" as const, id: "abc" };
+		const raw = serializeEvent(res);
+		expect(raw.endsWith(FRAME_DELIMITER)).toBe(true);
+		expect(JSON.parse(raw.trim())).toEqual(res);
+	});
+
+	it("preserves optional fields when omitted", () => {
+		const req = {
+			type: "ui_prompt_request" as const,
+			id: "abc",
+			kind: "select" as const,
+		};
+		const raw = serializeEvent(req);
+		const parsed = JSON.parse(raw.trim());
+		expect(parsed).toEqual(req);
+		expect(parsed.title).toBeUndefined();
+		expect(parsed.options).toBeUndefined();
+		expect(parsed.lines).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
 // serializeEvent
 // ---------------------------------------------------------------------------
 

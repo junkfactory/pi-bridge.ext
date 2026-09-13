@@ -9,10 +9,14 @@ import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Gate } from "./approval.js";
+import { debug, info } from "./log.js";
+import type { ResponsePayload } from "./prompt_mirror.js";
+import { getMirror, setMirrorReady } from "./prompt_mirror.js";
 import type {
 	ApprovalDecision,
 	InboundMessage,
 	PromptMessage,
+	UiPromptResponseMessage,
 } from "./protocol.js";
 
 /**
@@ -44,6 +48,12 @@ export function handleMessage(pi: ExtensionAPI, message: InboundMessage): void {
 		case "approval_response":
 			handleApprovalResponse(message.id, message.decision);
 			break;
+		case "mirror_ready":
+			handleMirrorReady();
+			break;
+		case "ui_prompt_response":
+			handleUiPromptResponse(message);
+			break;
 	}
 }
 
@@ -57,6 +67,48 @@ function handleApprovalResponse(id: string, decision: ApprovalDecision): void {
 	const gate = getGate();
 	if (!gate) return;
 	gate.handleResponse(id, decision);
+}
+
+/**
+ * Neovim announced its UI prompt mirror is live. Set the ready flag so
+ * `installMirror`'s wrappers start intercepting on the next turn.
+ * Idempotent — re-sent on reconnect (same flag value).
+ */
+function handleMirrorReady(): void {
+	setMirrorReady(true);
+	debug("Mirror ready", { ready: true });
+}
+
+/**
+ * Route an inbound `ui_prompt_response` to the live mirror. The
+ * protocol-validated message carries exactly one of `value`,
+ * `cancelled`, or `key`; map that to the mirror's `ResponsePayload`
+ * union. No-op if the mirror isn't installed yet (early message).
+ */
+function handleUiPromptResponse(message: UiPromptResponseMessage): void {
+	const mirror = getMirror();
+	if (!mirror) return; // mirror not installed (env kill switch or early)
+	const payload = mapUiPromptResponse(message);
+	info("Inbound ui_prompt_response", {
+		id: message.id,
+		kind: payload.kind,
+	});
+	mirror.handleResponse(message.id, payload);
+}
+
+/** Map a protocol-validated `UiPromptResponseMessage` to a `ResponsePayload`. */
+function mapUiPromptResponse(
+	message: UiPromptResponseMessage,
+): ResponsePayload {
+	if (message.value !== undefined) {
+		return { kind: "value", value: message.value };
+	}
+	if (message.cancelled !== undefined) {
+		return { kind: "cancelled" };
+	}
+	// message.key is guaranteed set by parseUiPromptResponseMessage's
+	// exactly-one-of invariant.
+	return { kind: "key", key: message.key as string };
 }
 
 /**

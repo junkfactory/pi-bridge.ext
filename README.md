@@ -183,6 +183,88 @@ Headless / RPC modes: when `ctx.hasUI === false` (e.g. `pi -p` or JSON output), 
 
 This is a **socket protocol change**. Both repos must be tagged at the same version when shipping approval support. See [Releasing — Cross-repo pairing](#cross-repo-pairing) below.
 
+### UI Prompt Mirror
+
+The mirror intercepts `ctx.ui.select`, `ctx.ui.confirm`, and `ctx.ui.custom` for any pi extension during Neovim-originated turns. The prompt is mirrored to Neovim (a `vim.ui.select` picker for select/confirm, a floating window + key forwarding for custom `ctx.ui.custom` components such as pi-permission-system's permission dialog); both surfaces race the same underlying decision, first answer wins.
+
+Turns typed directly into pi auto-pass-through (no mirror, no stall) — the mirror is origin-scoped exactly like the edit gate. The origin flag is set by the inbound `prompt` handler, cleared on `agent_end`, and dropped on every session boundary (`session_start` / `session_before_switch` / `session_shutdown`).
+
+Wrappers are installed on the shared extension ui object at `session_start` (pi builds a fresh ui object per session bind; a non-enumerable marker symbol guards against double-install on the same instance). Each wrapper gates on `active()` = env kill switch off AND `mirrorReady` AND nvim-originated turn; otherwise the original implementation is called untouched (zero overhead for pi-typed turns).
+
+```text
+ctx.ui.select / ctx.ui.confirm / ctx.ui.custom
+  ├─ env kill switch set? ── yes ─► original untouched
+  ├─ mirrorReady (nvim sent mirror_ready)? ── no ──► original untouched
+  ├─ nvim-originated turn? ── no ─► original untouched
+  ├─ broadcast ui_prompt_request {id, kind, title|lines}
+  ├─ race two surfaces:
+  │   ├─ nvim: vim.ui.select (select/confirm) or float + key forward (custom)
+  │   └─ pi: ctx.ui.custom dismissable component (select/confirm) or the
+  │          real terminal dialog (custom) — answers reach the component's
+  │          own done() / handleInput()
+  ├─ first answer wins:
+  │   ├─ select: chosen label returned; cancelled → undefined
+  │   ├─ confirm: "Yes" → true; "No" / cancelled → false
+  │   └─ custom: component's done() fires; wrapper broadcasts resolved
+  └─ broadcast ui_prompt_resolved {id} exactly once
+```
+
+What is NOT mirrored:
+
+- pi's core dialogs (model switcher, session picker, themes) — they use the TUI directly, not the extension ui context
+- pi's `@` autocomplete — wired into pi's internal `CustomEditor`, never through `ctx.ui`
+- `ctx.ui.input` / `ctx.ui.editor` — pass through to pi's TUI (answered there)
+
+Disconnect semantics:
+
+- **nvim disconnects mid-prompt** → the pi-side surface **stays open** awaiting the user's answer; the mirror does not resolve pending requests
+- **pi disconnects mid-mirror** → nvim dismisses its picker/float with a `pi disconnected` message (covered by [pi-bridge.nvim](https://github.com/junkfactory/pi-bridge.nvim))
+
+Handshake:
+
+- nvim sends `mirror_ready` once on connect; only then does the ext side install its wrappers onto `ctx.ui`
+- the ready flag is cleared on socket disconnect (and a new `mirror_ready` is required on reconnect)
+- on `session_before_switch` / `session_shutdown`, in-flight structured prompts are settled as cancelled and custom component refs are dropped (custom dialogs are torn down by pi's own close paths; we only drop our refs)
+
+Aborted select (`opts.signal.aborted`): the wrapper skips mirroring and calls the original, which resolves to `undefined` — no surface opens.
+
+Components without `render` or `handleInput`: the custom wrapper feature-detects before committing and passes the component through untouched (no broadcast, no wrapping).
+
+#### Mirror protocol (NDJSON, additive)
+
+**Neovim → pi** (hello + answer):
+
+```json
+{ "type": "mirror_ready" }
+{ "type": "ui_prompt_response", "id": "<uuid>",
+  "value": "<option label>" }      // picker answer (select / confirm)
+{ "type": "ui_prompt_response", "id": "<uuid>",
+  "cancelled": true }              // picker was dismissed (Esc / close)
+{ "type": "ui_prompt_response", "id": "<uuid>",
+  "key": "<raw bytes>" }           // custom-mirror keypress injection
+```
+
+`ui_prompt_response` carries exactly one of `value` / `cancelled` / `key`; the protocol layer rejects messages that set none or more than one.
+
+**pi → Neovim** (request + resolved):
+
+```json
+{ "type": "ui_prompt_request",  "id": "<uuid>",
+  "kind": "select" | "confirm",
+  "title": "<string>",
+  "options": ["<label>", ...] }
+{ "type": "ui_prompt_request",  "id": "<uuid>",
+  "kind": "custom",
+  "lines": ["<rendered line>", ...] }
+{ "type": "ui_prompt_resolved", "id": "<uuid>" }
+```
+
+`title` and `options` are absent on `custom` requests; `lines` is absent on `select` / `confirm`. ANSI may be present in `lines`; the nvim side strips SGR escape codes before rendering. `ui_prompt_resolved` is broadcast exactly once on every resolution path (nvim answer, pi answer, remote dismissal, session reset) so nvim can close its surface even when the user answered in pi.
+
+#### Mirror version pairing
+
+This is a **socket protocol change**. Both repos must be tagged at the same version when shipping mirror support. See [Releasing — Cross-repo pairing](#cross-repo-pairing) below.
+
 ### Key APIs Used
 
 - `pi.sendUserMessage()` — inject prompt as if typed in TUI
@@ -223,6 +305,7 @@ Levels: `trace`, `debug`, `info`, `warn`, `error`.
 
 - `PI_BRIDGE_LOG_LEVEL` — minimum log level (above)
 - `PI_BRIDGE_EDIT_APPROVAL=0` — disable the edit-approval gate entirely (every `edit`/`write` is allowed without prompting). The runtime kill-switch avoids a rebuild when the gate is in the way; flip back to `1` (or unset) to re-enable.
+- `PI_BRIDGE_UI_PROMPT_MIRROR=0` — disable the UI prompt mirror entirely; the extension never installs wrappers on `ctx.ui` and every extension's prompts go straight to pi's TUI. The runtime kill-switch avoids a rebuild when the mirror is in the way; flip back to `1` (or unset) to re-enable.
 - `PI_BRIDGE_LOG_FILE` — override the log destination (tests use this)
 
 ### Log Rotation
@@ -261,7 +344,7 @@ This runs `npm ci`, Biome lint, and the Vitest suite, creates a `v0.1.2` jj tag 
 
 Both repos release independently. The exception is a **socket protocol change** — both repos are then tagged at the same version. After both releases exist, a daily CI job appends a pairing line (e.g. "Requires pi-bridge.nvim v0.1.2") to each release's notes.
 
-The edit-approval gate (see [Edit Approval Gate](#edit-approval-gate)) introduces four new message types (`approval_request`, `approval_resolved`, `approval_ack`, `approval_response`). It must ship paired with the matching pi-bridge.nvim version.
+The edit-approval gate (see [Edit Approval Gate](#edit-approval-gate)) introduces four new message types (`approval_request`, `approval_resolved`, `approval_ack`, `approval_response`). The UI prompt mirror (see [UI Prompt Mirror](#ui-prompt-mirror)) introduces four more (`mirror_ready`, `ui_prompt_request`, `ui_prompt_response`, `ui_prompt_resolved`). Each protocol change must ship paired with the matching pi-bridge.nvim version.
 
 ### Dry run
 

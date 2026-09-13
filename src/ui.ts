@@ -40,6 +40,23 @@ export interface PromptHandle {
 	dismiss: () => void;
 }
 
+/**
+ * Result of a numbered-options prompt. On selection the user-chosen
+ * `options[n]` is returned wrapped in `{ label }`; on dismissal (Esc,
+ * `dismiss()`, or non-TUI mode) the string sentinel `"cancelled"` is
+ * returned. The discriminant is the leading string vs object shape.
+ */
+export type OptionsDecision = { label: string } | "cancelled";
+
+/**
+ * Handle for an in-flight numbered-options prompt. Same dismissable
+ * shape as `PromptHandle`, but resolves with `OptionsDecision`.
+ */
+export interface PromptOptionsHandle {
+	decision: Promise<OptionsDecision>;
+	dismiss: () => void;
+}
+
 const PROMPT_LINE = "approve: y / a(ll this file) / n  (Esc: cancel)";
 
 /**
@@ -91,8 +108,11 @@ class ApprovalPromptComponent implements ComponentLike {
  * (kitty, ghostty) Escape arrives as CSI-u — not the raw byte. Mirrors
  * pi-tui's `Key.escape` matching: raw `\x1b`, kitty CSI-u (`\x1b[27u`,
  * `\x1b[27;1u`), and xterm modifyOtherKeys (`\x1b[27;1;27~`).
+ *
+ * Exported so the UI mirror (src/prompt_mirror.ts) can reuse it when forwarding
+ * Escape bytes from Neovim's custom-mirror float.
  */
-function isEscapeKey(data: string): boolean {
+export function isEscapeKey(data: string): boolean {
 	if (data === "\x1b") return true;
 	// Biome forbids control characters in regex literals; build the escape
 	// byte dynamically.
@@ -165,6 +185,142 @@ export function promptSelection(ctx: ExtensionContext): PromptHandle {
 			if (!uiDone) {
 				// Non-TUI mode or the factory hasn't run yet — no component to
 				// tear down; settle the decision directly.
+				once("cancelled");
+			}
+		},
+	};
+}
+
+/**
+ * Maximum number of options that can be selected via a single digit key
+ * (`1`–`9`). Mirrors the common selector UX; longer option lists still
+ * render but only the first nine are key-mappable.
+ */
+const MAX_NUMBERED_OPTIONS = 9;
+
+/**
+ * Minimal Component that renders a bordered title line plus a numbered
+ * list of options and maps digit keys `1`–`9` to the corresponding
+ * option's label. Escape cancels (handled by the factory's `done`
+ * wrapper, which calls `isEscapeKey`).
+ */
+class OptionsPromptComponent implements ComponentLike {
+	handleInput?: (data: string) => void;
+
+	constructor(
+		private readonly tui: unknown,
+		private readonly theme: Theme,
+		private readonly title: string,
+		private readonly options: readonly string[],
+	) {}
+
+	render(width: number): string[] {
+		const lines: string[] = [];
+		const bar = `─${"─".repeat(Math.max(0, width - 2))}─`;
+		lines.push(bar);
+		// Title row (clamped to keep the border aligned).
+		const titleMax = Math.max(0, width - 4);
+		const titleText = this.title.slice(0, titleMax);
+		const titlePad = Math.max(0, width - titleText.length - 4);
+		lines.push(
+			`│ ${this.theme.fg("accent", titleText)}${" ".repeat(titlePad)} │`,
+		);
+		// Numbered options — first MAX_NUMBERED_OPTIONS get the digit hint;
+		// any remainder is rendered un-numbered (still visible, just not
+		// key-mappable).
+		this.options.forEach((opt, idx) => {
+			const n = idx + 1;
+			const prefix = n <= MAX_NUMBERED_OPTIONS ? `${n}. ` : "   ";
+			const content = `${prefix}${opt}`;
+			const contentMax = Math.max(0, width - 4);
+			const truncated = content.slice(0, contentMax);
+			const pad = Math.max(0, width - truncated.length - 4);
+			lines.push(`│ ${truncated}${" ".repeat(pad)} │`);
+		});
+		lines.push(bar);
+		// The tui reference is kept for parity with pi-tui components that
+		// need it for input-mode registration; we don't use it directly.
+		void this.tui;
+		return lines;
+	}
+
+	invalidate(): void {
+		// No cached state.
+	}
+}
+
+/**
+ * Show a dismissable numbered-options prompt and return a handle for it.
+ *
+ * Generic pi-side surface for select/confirm-style mirrors: renders a
+ * bordered `title` plus numbered options, maps keys `1`–`9` to
+ * `options[n-1]`, and Esc to `"cancelled"`. Same first-wins / remote-
+ * dismissal semantics as `promptSelection`.
+ *
+ * Non-TUI mode (`ctx.ui.custom` returns undefined) resolves
+ * `"cancelled"` — same fail-safe posture as the edit-approval gate.
+ */
+export function promptOptions(
+	ctx: ExtensionContext,
+	title: string,
+	options: readonly string[],
+): PromptOptionsHandle {
+	let settleDecision!: (d: OptionsDecision) => void;
+	const decision = new Promise<OptionsDecision>((resolve) => {
+		settleDecision = resolve;
+	});
+	let settled = false;
+	const once = (d: OptionsDecision) => {
+		if (settled) return;
+		settled = true;
+		settleDecision(d);
+	};
+
+	let uiDone: ((d: OptionsDecision) => void) | undefined;
+	let uiSettled = false;
+
+	const uiPromise = ctx.ui.custom<OptionsDecision>(
+		(tui, theme, _keybindings, rawDone) => {
+			uiDone = rawDone;
+			const done = (d: OptionsDecision) => {
+				if (uiSettled) return;
+				uiSettled = true;
+				rawDone(d);
+			};
+			const component = new OptionsPromptComponent(tui, theme, title, options);
+			component.handleInput = (data: string) => {
+				if (isEscapeKey(data)) {
+					done("cancelled");
+					return;
+				}
+				// Digit keys 1..9 select options[n-1]. Anything else is a
+				// no-op (the user might be mid-typing a different intent).
+				if (data.length === 1 && data >= "1" && data <= "9") {
+					const idx = Number.parseInt(data, 10) - 1;
+					if (idx >= 0 && idx < options.length) {
+						done({ label: options[idx] ?? "" });
+					}
+				}
+			};
+			return component;
+		},
+	);
+	void uiPromise.then((r) => once(r ?? "cancelled"));
+
+	return {
+		decision,
+		dismiss: () => {
+			if (uiDone && !uiSettled) {
+				// Mirror of `promptSelection`: tear it down through pi's
+				// done so the editor is restored; the decision flows back
+				// through uiPromise. once() keeps the first answer.
+				uiSettled = true;
+				uiDone("cancelled");
+				return;
+			}
+			if (!uiDone) {
+				// Non-TUI mode or factory hasn't run — no component; settle
+				// the decision directly.
 				once("cancelled");
 			}
 		},

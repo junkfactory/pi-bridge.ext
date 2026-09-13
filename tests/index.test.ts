@@ -4,12 +4,20 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildStartMessage, default as extension } from "../src/index.js";
-import { start, stop } from "../src/socket.js";
+import type { Mirror } from "../src/prompt_mirror.js";
+import {
+	getMirror,
+	installMirror,
+	isMirrorReady,
+	setMirrorReady,
+} from "../src/prompt_mirror.js";
+import { setOnDisconnect, start, stop } from "../src/socket.js";
 
 vi.mock("../src/socket.js", () => ({
 	start: vi.fn(),
 	stop: vi.fn(),
 	broadcast: vi.fn(),
+	setOnDisconnect: vi.fn(),
 }));
 
 vi.mock("../src/log.js", () => ({
@@ -30,6 +38,29 @@ vi.mock("../src/path.js", () => ({
 	),
 	ensureSocketDir: vi.fn(),
 }));
+
+vi.mock("../src/prompt_mirror.js", () => {
+	const installMirror = vi.fn();
+	const getMirror = vi.fn(() => stubMirror);
+	const setMirrorReady = vi.fn();
+	const isMirrorReady = vi.fn(() => false);
+	const stubMirror: Mirror = {
+		isActive: vi.fn(),
+		runSelect: vi.fn(),
+		runConfirm: vi.fn(),
+		runCustom: vi.fn(),
+		handleResponse: vi.fn(),
+		reset: vi.fn(),
+	};
+	return {
+		installMirror,
+		getMirror,
+		setMirrorReady,
+		isMirrorReady,
+		createMirror: vi.fn(),
+		setMirror: vi.fn(),
+	};
+});
 
 function mockCtx(
 	overrides?: Partial<ExtensionContext>,
@@ -103,6 +134,20 @@ function registerExtension(): {
 beforeEach(() => {
 	vi.mocked(start).mockReset().mockResolvedValue({ status: "started" });
 	vi.mocked(stop).mockReset().mockResolvedValue(undefined);
+	vi.mocked(setOnDisconnect).mockReset();
+	vi.mocked(installMirror).mockReset();
+	vi.mocked(getMirror).mockReset();
+	vi.mocked(getMirror).mockReturnValue({
+		isActive: vi.fn(),
+		runSelect: vi.fn(),
+		runConfirm: vi.fn(),
+		runCustom: vi.fn(),
+		handleResponse: vi.fn(),
+		reset: vi.fn(),
+	} as unknown as Mirror);
+	vi.mocked(setMirrorReady).mockReset();
+	vi.mocked(isMirrorReady).mockReset();
+	vi.mocked(isMirrorReady).mockReturnValue(false);
 	// Clear the global state between tests
 	const g = globalThis as typeof globalThis & {
 		__piBridgeOwnerSessionId?: string | null;
@@ -1114,5 +1159,114 @@ describe("extension — edit-tool system-prompt guard", () => {
 		} finally {
 			process.env.PI_BRIDGE_EDIT_APPROVAL = prev;
 		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// UI prompt mirror — Step 4 lifecycle wiring
+// ---------------------------------------------------------------------------
+
+describe("extension — UI prompt mirror lifecycle", () => {
+	it("installs the mirror on session_start when env kill switch is off", async () => {
+		const prev = process.env.PI_BRIDGE_UI_PROMPT_MIRROR;
+		delete process.env.PI_BRIDGE_UI_PROMPT_MIRROR;
+		try {
+			const { handlers } = registerExtension();
+			await handlers.session_start(
+				{ type: "session_start", reason: "startup" },
+				mockCtx(),
+			);
+			expect(installMirror).toHaveBeenCalledTimes(1);
+			expect(installMirror.mock.calls[0][0]).toBeDefined();
+			// installMirror must run AFTER start (which is required
+			// before inbound messages can be dispatched); verifying
+			// the call order keeps the wiring sequential.
+			expect(vi.mocked(start).mock.invocationCallOrder[0]).toBeLessThan(
+				vi.mocked(installMirror).mock.invocationCallOrder[0],
+			);
+		} finally {
+			process.env.PI_BRIDGE_UI_PROMPT_MIRROR = prev;
+		}
+	});
+
+	it("does NOT install the mirror when PI_BRIDGE_UI_PROMPT_MIRROR=0", async () => {
+		const prev = process.env.PI_BRIDGE_UI_PROMPT_MIRROR;
+		process.env.PI_BRIDGE_UI_PROMPT_MIRROR = "0";
+		try {
+			const { handlers } = registerExtension();
+			await handlers.session_start(
+				{ type: "session_start", reason: "startup" },
+				mockCtx(),
+			);
+			expect(installMirror).not.toHaveBeenCalled();
+		} finally {
+			process.env.PI_BRIDGE_UI_PROMPT_MIRROR = prev;
+		}
+	});
+
+	it("resets the mirror on session_before_switch", async () => {
+		const { handlers } = registerExtension();
+		await handlers.session_before_switch({});
+		expect(getMirror).toHaveBeenCalled();
+		// The live mirror singleton's reset is called via getMirror().
+		// Confirm the resolved mirror's reset was invoked.
+		const resolved = vi.mocked(getMirror).mock.results[0]?.value as Mirror;
+		expect(resolved?.reset).toHaveBeenCalled();
+	});
+
+	it("resets the mirror on session_shutdown (any reason)", async () => {
+		const { handlers } = registerExtension();
+		await handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "quit" },
+			mockCtx(),
+		);
+		const resolved = vi.mocked(getMirror).mock.results.at(-1)?.value as Mirror;
+		expect(resolved?.reset).toHaveBeenCalled();
+	});
+
+	it("resets the mirror on session_shutdown with non-quit reason too", async () => {
+		const { handlers } = registerExtension();
+		await handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "new" },
+			mockCtx(),
+		);
+		const resolved = vi.mocked(getMirror).mock.results.at(-1)?.value as Mirror;
+		expect(resolved?.reset).toHaveBeenCalled();
+	});
+
+	it("does not throw when mirror is absent (env kill switch) and session boundaries fire", async () => {
+		// getMirror returns null — the early-return path in the
+		// lifecycle hooks must not blow up.
+		vi.mocked(getMirror).mockReturnValue(null);
+		const { handlers } = registerExtension();
+		expect(() => handlers.session_before_switch({})).not.toThrow();
+		expect(() =>
+			handlers.session_shutdown(
+				{ type: "session_shutdown", reason: "new" },
+				mockCtx(),
+			),
+		).not.toThrow();
+	});
+
+	it("wires a disconnect handler that clears the mirror ready flag", async () => {
+		const { handlers } = registerExtension();
+		await handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(),
+		);
+
+		// setOnDisconnect was called at least once (either via the
+		// lazy getGate or via the session_start path); capture the
+		// latest callback that was wired.
+		expect(setOnDisconnect).toHaveBeenCalled();
+		const lastCb = vi
+			.mocked(setOnDisconnect)
+			.mock.calls.at(-1)?.[0] as () => void;
+		expect(typeof lastCb).toBe("function");
+
+		// Invoke it — must call setMirrorReady(false).
+		vi.mocked(setMirrorReady).mockClear();
+		lastCb();
+		expect(setMirrorReady).toHaveBeenCalledWith(false);
 	});
 });

@@ -43,9 +43,11 @@ import { handleMessage } from "./handler.js";
 import type { LogLevel } from "./log.js";
 import { debug, error, info, logPath, setLogLevel, warn } from "./log.js";
 import { ensureSocketDir, socketPath } from "./path.js";
+import { getMirror, installMirror, setMirrorReady } from "./prompt_mirror.js";
 import type { ErrorCode, OutboundEvent } from "./protocol.js";
 import { parseMessage, serializeEvent } from "./protocol.js";
 import { broadcast, setOnDisconnect, start, stop } from "./socket.js";
+import { getNvimTurnActive, setNvimTurnActive } from "./turn.js";
 import { type PromptDecision, promptSelection } from "./ui.js";
 
 /**
@@ -58,17 +60,10 @@ import { type PromptDecision, promptSelection } from "./ui.js";
  * Stored on globalThis so the value survives module reloads (jiti
  * re-evaluates the extension factory more than once per process), and
  * so tests can reset it between cases without a separate test-only
- * export.
+ * export. The flag lives in `src/turn.ts` so other modules
+ * (e.g. the UI prompt mirror) can read the same value without pulling
+ * `src/index.ts` into their import graph.
  */
-const globalScopeForOrigin = globalThis as typeof globalThis & {
-	__piBridgeNvimTurnActive?: boolean;
-};
-function getNvimTurnActive(): boolean {
-	return globalScopeForOrigin.__piBridgeNvimTurnActive === true;
-}
-function setNvimTurnActive(v: boolean): void {
-	globalScopeForOrigin.__piBridgeNvimTurnActive = v;
-}
 
 /**
  * Map of ExtensionAPI instances by sessionId, shared across jiti module
@@ -125,15 +120,25 @@ function getGate(): Gate {
 				broadcast(serializeEvent({ type: "approval_resolved", id }));
 			},
 		});
-		// Wire socket disconnects to the gate. The gate's handleDisconnect is
-		// a no-op for the pending request itself — the pi prompt stays open
-		// awaiting the user's answer; we just give the gate a chance to log
-		// if it ever needs to.
-		setOnDisconnect(() => {
-			globalScope.__piBridgeGate?.handleDisconnect();
-		});
 	}
 	return globalScope.__piBridgeGate;
+}
+
+/**
+ * Wire the socket disconnect callback. Idempotent — re-installing the
+ * same function reference is a no-op. Called eagerly at session_start
+ * (so a session that never edits still has its mirror ready flag
+ * cleared on disconnect) and lazily inside getGate's first creation.
+ */
+function wireDisconnectHandlers(): void {
+	setOnDisconnect(() => {
+		// Gate: no-op for pending requests — the pi prompt stays open
+		// awaiting the user's answer; the gate gets a chance to log.
+		globalScope.__piBridgeGate?.handleDisconnect();
+		// Mirror: clear the ready flag so a stale `mirror_ready` from a
+		// prior connection can never reach a future prompt.
+		setMirrorReady(false);
+	});
 }
 
 /** Reset and re-install the gate (used by session lifecycle hooks). */
@@ -141,6 +146,11 @@ function resetGate(): void {
 	if (globalScope.__piBridgeGate) {
 		globalScope.__piBridgeGate.reset();
 	}
+	// Mirror: settle any in-flight structured prompts as cancelled and
+	// drop custom component refs at session boundaries. Ready flag is
+	// intentionally untouched here — it persists across session switches
+	// per the design.
+	getMirror()?.reset();
 	// Session boundaries always clear the origin flag — a fresh session
 	// starts in pi-typed mode until nvim sends a new prompt.
 	setNvimTurnActive(false);
@@ -365,6 +375,25 @@ export default function (pi: ExtensionAPI) {
 				case "skipped":
 					break;
 			}
+
+			// UI prompt mirror: wrap the session's ui object so any
+			// extension's blocking prompt is mirrored to nvim during
+			// nvim-originated turns. installMirror self-checks the env
+			// kill switch AND the marker symbol; the call-site check
+			// here is for log clarity and to skip the ctx.ui.bind work
+			// when we know it'll no-op. Safe to call when the socket
+			// status is foreign-owner — wrappers self-gate on
+			// isMirrorReady() and stay inert until nvim sends
+			// `mirror_ready`.
+			if (process.env.PI_BRIDGE_UI_PROMPT_MIRROR !== "0") {
+				installMirror(ctx);
+			}
+			// Wire the disconnect handler eagerly so a session that never
+			// edits still has the mirror's ready flag cleared on
+			// disconnect. The gate's handleDisconnect (no-op for pending
+			// requests) is also called here so the order of gate/mirror
+			// initialization doesn't matter.
+			wireDisconnectHandlers();
 		} catch (err) {
 			error("Failed to start pi-bridge socket", { err: String(err) });
 		}
@@ -546,6 +575,12 @@ export default function (pi: ExtensionAPI) {
 		// but the owner's session_start will re-establish it for any
 		// follow-up nvim prompts.
 		setNvimTurnActive(false);
+		// Mirror: settle any in-flight structured prompts as cancelled
+		// and drop custom component refs. The wrappers are tied to the
+		// ui object built for this session bind, so on the next
+		// session_start a fresh ui object gets fresh wrappers anyway —
+		// this reset is for callers already awaiting the race.
+		getMirror()?.reset();
 
 		const sessionId = ctx.sessionManager.getSessionId();
 		getPiMap().delete(sessionId);

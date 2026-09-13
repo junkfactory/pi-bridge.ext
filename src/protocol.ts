@@ -13,7 +13,27 @@
 export type InboundMessage =
 	| PromptMessage
 	| ApprovalAckMessage
-	| ApprovalResponseMessage;
+	| ApprovalResponseMessage
+	| MirrorReadyMessage
+	| UiPromptResponseMessage;
+
+/** Neovim → pi: hello, sent on connect so pi-bridge knows the mirror is live. */
+export interface MirrorReadyMessage {
+	type: "mirror_ready";
+}
+
+/** Neovim → pi: answer for an outstanding ui_prompt_request.
+ *  Exactly one of `value` / `cancelled` / `key` must be set:
+ *    value     — picker answer for select/confirm (full original label)
+ *    cancelled — picker was dismissed (Esc / close)
+ *    key       — raw keypress to inject into a custom-mirror component */
+export interface UiPromptResponseMessage {
+	type: "ui_prompt_response";
+	id: string;
+	value?: string;
+	cancelled?: boolean;
+	key?: string;
+}
 
 /** Acknowledgement that Neovim rendered the approval prompt. */
 export interface ApprovalAckMessage {
@@ -71,12 +91,36 @@ export interface ApprovalResolvedEvent {
 	id: string;
 }
 
+/** pi → Neovim: a blocking prompt is awaiting user input.
+ *  `kind`:
+ *    select  — options picker; `title` + `options` set
+ *    confirm — two-option picker (Yes/No); `title` + `options` set
+ *    custom  — custom component mirror; `lines` set (rendered, ANSI present)
+ *  Neovim answers via `ui_prompt_response`; either side may resolve first. */
+export interface UiPromptRequestEvent {
+	type: "ui_prompt_request";
+	id: string;
+	kind: "select" | "confirm" | "custom";
+	title?: string;
+	options?: string[];
+	lines?: string[];
+}
+
+/** pi → Neovim: a previously broadcast ui_prompt_request has been settled.
+ *  Sent exactly once per request; lets Neovim close any stale surface. */
+export interface UiPromptResolvedEvent {
+	type: "ui_prompt_resolved";
+	id: string;
+}
+
 /** Event pushed to Neovim. */
 export type OutboundEvent =
 	| AgentLifecycleEvent
 	| ErrorEvent
 	| ApprovalRequestEvent
-	| ApprovalResolvedEvent;
+	| ApprovalResolvedEvent
+	| UiPromptRequestEvent
+	| UiPromptResolvedEvent;
 
 export interface AgentLifecycleEvent {
 	type: "agent_start" | "agent_end";
@@ -138,6 +182,10 @@ export function parseMessage(raw: string): InboundMessage | null {
 			return parseApprovalAckMessage(parsed);
 		case "approval_response":
 			return parseApprovalResponseMessage(parsed);
+		case "mirror_ready":
+			return parseMirrorReadyMessage(parsed);
+		case "ui_prompt_response":
+			return parseUiPromptResponseMessage(parsed);
 		default:
 			return null;
 	}
@@ -213,4 +261,39 @@ function parseApprovalResponseMessage(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseMirrorReadyMessage(
+	_obj: Record<string, unknown>,
+): MirrorReadyMessage | null {
+	return { type: "mirror_ready" };
+}
+
+function parseUiPromptResponseMessage(
+	obj: Record<string, unknown>,
+): UiPromptResponseMessage | null {
+	if (typeof obj.id !== "string" || obj.id.length === 0) return null;
+
+	const hasValue = obj.value !== undefined;
+	const hasCancelled = obj.cancelled !== undefined;
+	const hasKey = obj.key !== undefined;
+	const setCount =
+		(hasValue ? 1 : 0) + (hasCancelled ? 1 : 0) + (hasKey ? 1 : 0);
+	if (setCount !== 1) return null;
+
+	const msg: UiPromptResponseMessage = {
+		type: "ui_prompt_response",
+		id: obj.id,
+	};
+	if (hasValue) {
+		if (typeof obj.value !== "string") return null;
+		msg.value = obj.value;
+	} else if (hasCancelled) {
+		if (typeof obj.cancelled !== "boolean") return null;
+		msg.cancelled = obj.cancelled;
+	} else {
+		if (typeof obj.key !== "string") return null;
+		msg.key = obj.key;
+	}
+	return msg;
 }
