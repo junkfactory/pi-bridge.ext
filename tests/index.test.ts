@@ -835,9 +835,14 @@ describe("extension — edit-approval origin gate", () => {
 				reason: expect.stringContaining("User rejected edit to"),
 			});
 			// The pi prompt was opened (race happened), but the user's late
-			// answer is never consumed.
+			// answer is never consumed. The gate-win path must dismiss the
+			// prompt: its decision resolves "cancelled" → handleCancel (a
+			// first-wins no-op in the real gate).
 			expect(ctx.ui.custom).toHaveBeenCalledTimes(1);
 			expect(gate.handleResponse).not.toHaveBeenCalled();
+			expect(gate.handleCancel).toHaveBeenCalledWith(
+				expect.stringMatching(/.+/),
+			);
 			// Clean up the dangling prompt so the test exits.
 			resolveCustomRef.current("yes");
 		} finally {

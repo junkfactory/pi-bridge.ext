@@ -88,10 +88,10 @@ function makeCtxWithCapturedCustom(): {
 describe("promptSelection — component lifecycle", () => {
 	it("calls ctx.ui.custom (no overlay flag) with a component factory", async () => {
 		const { ctx, resolveCustomRef, captured } = makeCtxWithCapturedCustom();
-		const promise = promptSelection(ctx);
+		const handle = promptSelection(ctx);
 		// Settle so the test exits cleanly.
 		resolveCustomRef.current("yes");
-		await promise;
+		await handle.decision;
 		expect(ctx.ui.custom).toHaveBeenCalledTimes(1);
 		const [factory, options] = (ctx.ui.custom as ReturnType<typeof vi.fn>).mock
 			.calls[0] as [unknown, unknown];
@@ -108,7 +108,7 @@ describe("promptSelection — component lifecycle", () => {
 
 	it("renders a bordered y/a/n prompt line", async () => {
 		const { ctx, resolveCustomRef, captured } = makeCtxWithCapturedCustom();
-		const promise = promptSelection(ctx);
+		const handle = promptSelection(ctx);
 		const lines = captured.component.render(80);
 		// Three lines: top border, prompt line, bottom border.
 		expect(lines).toHaveLength(3);
@@ -121,7 +121,7 @@ describe("promptSelection — component lifecycle", () => {
 		// rendered hint so the user knows how to cancel.
 		expect(promptLine.toLowerCase()).toContain("esc");
 		resolveCustomRef.current("yes");
-		await promise;
+		await handle.decision;
 	});
 });
 
@@ -133,33 +133,33 @@ describe("promptSelection — key handling", () => {
 	] as const) {
 		it(`maps '${key}' to done('${expected}')`, async () => {
 			const { ctx, captured } = makeCtxWithCapturedCustom();
-			const promise = promptSelection(ctx);
+			const handle = promptSelection(ctx);
 			captured.component.handleInput?.(key);
 			expect(captured.done).toHaveBeenCalledWith(expected);
-			expect(await promise).toBe(expected);
+			expect(await handle.decision).toBe(expected);
 		});
 	}
 
 	for (const escKey of ["\x1b", "\x1b[27u", "\x1b[27;1u", "\x1b[27;1;27~"]) {
 		it(`maps escape (${JSON.stringify(escKey)}) to done('cancelled')`, async () => {
 			const { ctx, captured } = makeCtxWithCapturedCustom();
-			const promise = promptSelection(ctx);
+			const handle = promptSelection(ctx);
 			captured.component.handleInput?.(escKey);
 			expect(captured.done).toHaveBeenCalledWith("cancelled");
-			expect(await promise).toBe("cancelled");
+			expect(await handle.decision).toBe("cancelled");
 		});
 	}
 
 	it("ignores unrelated keys (does not call done)", async () => {
 		const { ctx, resolveCustomRef, captured } = makeCtxWithCapturedCustom();
-		const promise = promptSelection(ctx);
+		const handle = promptSelection(ctx);
 		for (const key of ["Y", "x", "\r", "\t", "1", " "]) {
 			captured.component.handleInput?.(key);
 		}
 		expect(captured.done).not.toHaveBeenCalled();
 		// Settle so the test exits.
 		resolveCustomRef.current("no");
-		await promise;
+		await handle.decision;
 	});
 });
 
@@ -170,6 +170,41 @@ describe("promptSelection — non-TUI fallback", () => {
 				custom: vi.fn().mockResolvedValue(undefined),
 			},
 		} as unknown as Parameters<typeof promptSelection>[0];
-		expect(await promptSelection(ctx)).toBe("cancelled");
+		const handle = promptSelection(ctx);
+		expect(await handle.decision).toBe("cancelled");
+		// dismiss() must be safe with no component ever created.
+		handle.dismiss();
+		expect(await handle.decision).toBe("cancelled");
+	});
+});
+
+describe("promptSelection — remote dismissal", () => {
+	it("dismiss() resolves 'cancelled' and tears the component down", async () => {
+		const { ctx, captured } = makeCtxWithCapturedCustom();
+		const handle = promptSelection(ctx);
+		handle.dismiss();
+		// pi's done() must be called so the editor is restored...
+		expect(captured.done).toHaveBeenCalledWith("cancelled");
+		// ...and the decision promise must settle without a keypress.
+		expect(await handle.decision).toBe("cancelled");
+	});
+
+	it("dismiss() after a keypress is a no-op (first answer wins)", async () => {
+		const { ctx, captured } = makeCtxWithCapturedCustom();
+		const handle = promptSelection(ctx);
+		captured.component.handleInput?.("y");
+		handle.dismiss();
+		expect(captured.done).toHaveBeenCalledTimes(1);
+		expect(captured.done).toHaveBeenCalledWith("yes");
+		expect(await handle.decision).toBe("yes");
+	});
+
+	it("keypress after dismiss() is a no-op", async () => {
+		const { ctx, captured } = makeCtxWithCapturedCustom();
+		const handle = promptSelection(ctx);
+		handle.dismiss();
+		captured.component.handleInput?.("y");
+		expect(captured.done).toHaveBeenCalledTimes(1);
+		expect(await handle.decision).toBe("cancelled");
 	});
 });

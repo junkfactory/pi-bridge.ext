@@ -450,25 +450,23 @@ export default function (pi: ExtensionAPI) {
 
 			// Pi-side prompt: independent of the gate's pending state. If
 			// nvim responds while the prompt is up, the gate settles and
-			// broadcasts approval_resolved (dismisses nvim's picker), but
-			// the pi prompt stays open until the user presses a key — a
-			// late answer is a no-op because handleResponse short-circuits
-			// on unknown ids.
-			const promptPromise = promptSelection(ctx).then(
-				(decision: PromptDecision) => {
-					// Feed the pi-side decision back through the gate so
-					// per-file memory updates (for "all") and the single
-					// approval_resolved broadcast fire exactly once via
-					// onResolved. Esc cancels the pending request without
-					// marking the path as approved.
-					if (decision === "cancelled") {
-						gate.handleCancel(id);
-					} else {
-						gate.handleResponse(id, decision);
-					}
-					return decision;
-				},
-			);
+			// broadcasts approval_resolved (dismisses nvim's picker), and
+			// the pi prompt is dismissed below — a late keypress would be
+			// a no-op because handleResponse short-circuits on unknown ids.
+			const prompt = promptSelection(ctx);
+			const promptPromise = prompt.decision.then((decision: PromptDecision) => {
+				// Feed the pi-side decision back through the gate so
+				// per-file memory updates (for "all") and the single
+				// approval_resolved broadcast fire exactly once via
+				// onResolved. Esc cancels the pending request without
+				// marking the path as approved.
+				if (decision === "cancelled") {
+					gate.handleCancel(id);
+				} else {
+					gate.handleResponse(id, decision);
+				}
+				return decision;
+			});
 
 			// Await whichever settles first. The loser keeps running but
 			// its eventual resolution is ignored (gate.handleResponse
@@ -480,6 +478,11 @@ export default function (pi: ExtensionAPI) {
 			]);
 
 			if (winner.kind === "gate") {
+				// The gate settled first (nvim answered, Ctrl+C abort, or a
+				// session reset) — tear the pi prompt down so the editor is
+				// restored. The prompt's late "cancelled" feeds handleCancel,
+				// which no-ops (first-wins).
+				prompt.dismiss();
 				return mapDecision(winner.result, diffResult.path, toolName);
 			}
 			// Pi won — the gate already settled (via our handleResponse

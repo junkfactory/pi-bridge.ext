@@ -12,7 +12,14 @@
  *
  * The diff itself is rendered by pi's built-in edit/write preview in the
  * transcript; we don't duplicate it here. Restoration of the editor is
- * handled by pi when `done()` is called.
+ * handled by pi when pi's `done()` is called.
+ *
+ * Remote dismissal: the gate can settle before the user presses a key
+ * (nvim answered first, Ctrl+C abort, session reset). `promptSelection`
+ * therefore returns a handle whose `dismiss()` tears the component down
+ * (resolves as "cancelled") so pi's editor is restored immediately
+ * instead of waiting for a keypress that would be a first-wins no-op
+ * anyway.
  *
  * RPC / headless: `ctx.ui.custom` returns undefined in non-TUI modes. We
  * resolve "cancelled" in that case so the gate still blocks the edit
@@ -22,6 +29,16 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 
 export type PromptDecision = "yes" | "all" | "no" | "cancelled";
+
+/**
+ * Handle for the in-flight pi-side prompt. `decision` resolves with the
+ * user's keypress (or "cancelled" when dismissed programmatically or in
+ * non-TUI modes); `dismiss()` closes the prompt remotely.
+ */
+export interface PromptHandle {
+	decision: Promise<PromptDecision>;
+	dismiss: () => void;
+}
 
 const PROMPT_LINE = "approve: y / a(ll this file) / n  (Esc: cancel)";
 
@@ -86,17 +103,39 @@ function isEscapeKey(data: string): boolean {
 }
 
 /**
- * Show the approval prompt and wait for the user's answer.
+ * Show the approval prompt and return a handle for it.
  *
  * Replaces pi's input box with our focused component (no overlay), so the
  * editor is hidden for the duration of the prompt. pi restores the editor
- * when `done()` is called.
+ * when pi's `done()` is called — either by a keypress or by `dismiss()`.
  */
-export async function promptSelection(
-	ctx: ExtensionContext,
-): Promise<PromptDecision> {
-	const result = await ctx.ui.custom<PromptDecision>(
-		(tui, theme, _keybindings, done) => {
+export function promptSelection(ctx: ExtensionContext): PromptHandle {
+	let settleDecision!: (d: PromptDecision) => void;
+	const decision = new Promise<PromptDecision>((resolve) => {
+		settleDecision = resolve;
+	});
+	let settled = false;
+	const once = (d: PromptDecision) => {
+		if (settled) return;
+		settled = true;
+		settleDecision(d);
+	};
+
+	// pi's `done` callback, captured so dismiss() can tear the component
+	// down when the user never presses a key. `uiSettled` guards against
+	// calling it twice (keypress race) — pi's done is not documented as
+	// idempotent.
+	let uiDone: ((d: PromptDecision) => void) | undefined;
+	let uiSettled = false;
+
+	const uiPromise = ctx.ui.custom<PromptDecision>(
+		(tui, theme, _keybindings, rawDone) => {
+			uiDone = rawDone;
+			const done = (d: PromptDecision) => {
+				if (uiSettled) return;
+				uiSettled = true;
+				rawDone(d);
+			};
 			const component = new ApprovalPromptComponent(tui, theme);
 			component.handleInput = (data: string) => {
 				if (data === "y") done("yes");
@@ -107,8 +146,27 @@ export async function promptSelection(
 			return component;
 		},
 	);
-	// Non-TUI modes (RPC / print / json) return undefined — preserve the
-	// fail-safe "cancelled" semantics from the prior overlay path.
-	if (result === undefined) return "cancelled";
-	return result;
+	// Keypress path: forward pi's resolution (undefined in non-TUI modes →
+	// fail-safe "cancelled").
+	void uiPromise.then((r) => once(r ?? "cancelled"));
+
+	return {
+		decision,
+		dismiss: () => {
+			if (uiDone && !uiSettled) {
+				// Component exists and no keypress yet — tear it down through
+				// pi's done so the editor is restored. The decision flows back
+				// through uiPromise, so a keypress racing this microtask still
+				// wins (once() keeps the first answer).
+				uiSettled = true;
+				uiDone("cancelled");
+				return;
+			}
+			if (!uiDone) {
+				// Non-TUI mode or the factory hasn't run yet — no component to
+				// tear down; settle the decision directly.
+				once("cancelled");
+			}
+		},
+	};
 }
