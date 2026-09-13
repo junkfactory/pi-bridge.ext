@@ -30,7 +30,12 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { serializeEvent } from "./protocol.js";
 import { broadcast } from "./socket.js";
 import { getNvimTurnActive } from "./turn.js";
-import { isEscapeKey, type PromptOptionsHandle, promptOptions } from "./ui.js";
+import {
+	GATE_PROMPT_KEY,
+	isEscapeKey,
+	type PromptOptionsHandle,
+	promptOptions,
+} from "./ui.js";
 
 // ---------------------------------------------------------------------------
 // Shared singleton state (survives jiti module reloads within one process)
@@ -419,6 +424,15 @@ export function createMirror(opts: CreateMirrorOptions): Mirror {
 		) => Promise<T>,
 		options?: { overlay?: boolean },
 	): Promise<T> => {
+		// The edit-approval gate's own prompt calls ctx.ui.custom on this
+		// same ui object — pass it through untouched. The gate has its
+		// own nvim surface (approval_request); mirroring it would stack a
+		// notice + modal loop on top of the gate's y/a/n prompt and
+		// swallow its input.
+		const uiHost = _ctx.ui as unknown as Record<string, unknown>;
+		if (uiHost[GATE_PROMPT_KEY] === true) {
+			return original(userFactory, options);
+		}
 		// Per the design: feature-detection happens BEFORE we commit to
 		// broadcasting — components without render/handleInput pass
 		// through untouched. We don't have the component yet (the

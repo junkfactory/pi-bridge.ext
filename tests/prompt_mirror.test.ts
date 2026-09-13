@@ -26,6 +26,7 @@ import {
 	setMirrorReady,
 } from "../src/prompt_mirror.js";
 import { setNvimTurnActive } from "../src/turn.js";
+import { GATE_PROMPT_KEY } from "../src/ui.js";
 
 function makeTheme() {
 	initTheme("dark");
@@ -643,6 +644,53 @@ describe("Mirror — custom pass-through", () => {
 		);
 		expect(result).toBe("ORIGINAL-RESULT");
 		expect(bc.events).toHaveLength(0);
+	});
+
+	it("gate's own prompt (GATE_PROMPT_KEY) → pass-through, no broadcast", async () => {
+		// The edit-approval gate's promptSelection calls ctx.ui.custom on
+		// this same ui object. The mirror must pass it through untouched:
+		// the gate has its own nvim surface (approval_request), and
+		// mirroring it would stack a notice + modal loop on top of the
+		// gate's y/a/n prompt (found live in e2e testing).
+		setMirrorReady(true);
+		setNvimTurnActive(true);
+		const bc = makeBroadcast();
+		const mirror = createMirror({ broadcast: bc.emit });
+		const { ui } = makeUiWithCapturedCustom();
+		const ctx = makeCtx(ui);
+		(ui as unknown as Record<string, unknown>)[GATE_PROMPT_KEY] = true;
+
+		const gateComponent = makeMirrorableComponent(["gate"]);
+		const originalCustom = vi.fn(
+			async (
+				factory: (
+					tui: unknown,
+					theme: unknown,
+					keybindings: unknown,
+					done: (decision: unknown) => void,
+				) => unknown,
+			) => {
+				const result = (await factory(
+					{},
+					makeTheme(),
+					{},
+					() => {},
+				)) as MirrorComponent;
+				expect(result).toBe(gateComponent); // returned untouched
+				return "GATE-RESULT";
+			},
+		);
+
+		const result = await mirror.runCustom(
+			ctx,
+			vi.fn(() => gateComponent as MirrorComponent),
+			originalCustom as unknown as Parameters<typeof mirror.runCustom>[2],
+		);
+		expect(result).toBe("GATE-RESULT");
+		expect(bc.events).toHaveLength(0);
+		// Flag must not leak: cleanup here (ui.ts clears it in a finally
+		// around its own call; we set it manually in this test).
+		(ui as unknown as Record<string, unknown>)[GATE_PROMPT_KEY] = false;
 	});
 
 	it("async user factory is awaited before feature-detect", async () => {

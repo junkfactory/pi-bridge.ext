@@ -123,6 +123,14 @@ export function isEscapeKey(data: string): boolean {
 }
 
 /**
+ * Set on the ui object while the edit-approval gate's own prompt is
+ * opening, so the prompt mirror's `ctx.ui.custom` wrapper passes the
+ * call through untouched — the gate's y/a/n prompt must never be
+ * mirrored into Neovim (it has its own approval_request surface there).
+ */
+export const GATE_PROMPT_KEY = "__piBridgeGatePrompt";
+
+/**
  * Shared first-wins / remote-dismissal machinery for the two pi-side
  * prompts (`promptSelection`, `promptOptions`). Owns: the settle-decision
  * promise + `once()` guard, the wrapped-done (pi's `done` isn't documented
@@ -156,8 +164,14 @@ function promptWithHandle<T>(
 	let uiDone: ((d: T) => void) | undefined;
 	let uiSettled = false;
 
-	const uiPromise = ctx.ui.custom<T>(
-		(tui, theme, _keybindings, rawDone) => {
+	// Flag the gate's own call so the prompt mirror's ctx.ui.custom
+	// wrapper passes it through untouched (no nvim notice for the
+	// y/a/n approval prompt).
+	const uiHost = ctx.ui as unknown as Record<string, unknown>;
+	uiHost[GATE_PROMPT_KEY] = true;
+	let uiPromise: Promise<T | undefined>;
+	try {
+		uiPromise = ctx.ui.custom<T>((tui, theme, _keybindings, rawDone) => {
 			uiDone = rawDone;
 			const done = (d: T) => {
 				if (uiSettled) return;
@@ -165,8 +179,10 @@ function promptWithHandle<T>(
 				rawDone(d);
 			};
 			return build(tui, theme, done);
-		},
-	);
+		});
+	} finally {
+		uiHost[GATE_PROMPT_KEY] = false;
+	}
 	// Keypress path: forward pi's resolution (undefined in non-TUI modes →
 	// fail-safe "cancelled").
 	void uiPromise.then((r) => once(r ?? cancelled));
@@ -200,16 +216,20 @@ function promptWithHandle<T>(
  * when pi's `done()` is called — either by a keypress or by `dismiss()`.
  */
 export function promptSelection(ctx: ExtensionContext): PromptHandle {
-	return promptWithHandle<PromptDecision>(ctx, "cancelled", (tui, theme, done) => {
-		const component = new ApprovalPromptComponent(tui, theme);
-		component.handleInput = (data: string) => {
-			if (data === "y") done("yes");
-			else if (data === "a") done("all");
-			else if (data === "n") done("no");
-			else if (isEscapeKey(data)) done("cancelled");
-		};
-		return component;
-	});
+	return promptWithHandle<PromptDecision>(
+		ctx,
+		"cancelled",
+		(tui, theme, done) => {
+			const component = new ApprovalPromptComponent(tui, theme);
+			component.handleInput = (data: string) => {
+				if (data === "y") done("yes");
+				else if (data === "a") done("all");
+				else if (data === "n") done("no");
+				else if (isEscapeKey(data)) done("cancelled");
+			};
+			return component;
+		},
+	);
 }
 
 /**
@@ -286,22 +306,26 @@ export function promptOptions(
 	title: string,
 	options: readonly string[],
 ): PromptOptionsHandle {
-	return promptWithHandle<OptionsDecision>(ctx, "cancelled", (tui, theme, done) => {
-		const component = new OptionsPromptComponent(tui, theme, title, options);
-		component.handleInput = (data: string) => {
-			if (isEscapeKey(data)) {
-				done("cancelled");
-				return;
-			}
-			// Digit keys 1..9 select options[n-1]. Anything else is a
-			// no-op (the user might be mid-typing a different intent).
-			if (data.length === 1 && data >= "1" && data <= "9") {
-				const idx = Number.parseInt(data, 10) - 1;
-				if (idx >= 0 && idx < options.length) {
-					done({ label: options[idx] ?? "" });
+	return promptWithHandle<OptionsDecision>(
+		ctx,
+		"cancelled",
+		(tui, theme, done) => {
+			const component = new OptionsPromptComponent(tui, theme, title, options);
+			component.handleInput = (data: string) => {
+				if (isEscapeKey(data)) {
+					done("cancelled");
+					return;
 				}
-			}
-		};
-		return component;
-	});
+				// Digit keys 1..9 select options[n-1]. Anything else is a
+				// no-op (the user might be mid-typing a different intent).
+				if (data.length === 1 && data >= "1" && data <= "9") {
+					const idx = Number.parseInt(data, 10) - 1;
+					if (idx >= 0 && idx < options.length) {
+						done({ label: options[idx] ?? "" });
+					}
+				}
+			};
+			return component;
+		},
+	);
 }
