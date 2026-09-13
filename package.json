@@ -1,6 +1,6 @@
 {
   "name": "pi-bridge.ext",
-  "version": "0.1.0",
+  "version": "1.2.0",
   "description": "Pi extension for Neovim integration via Unix socket",
   "keywords": [
     "pi-package"
