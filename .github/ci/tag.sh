@@ -36,11 +36,38 @@ npm ci
 npx @biomejs/biome check .
 npx vitest run
 
+# Sync package.json into the release: the tagged commit must carry the
+# version it names. npm bumps package.json + package-lock.json without
+# touching VCS; the bump is committed on main as `chore: release vX.Y.Z`
+# and the tag points at that commit.
+#
+# Empty-WC handling: after a `jj new main` the working copy is an empty
+# commit on top of main. `jj commit` on it would auto-create a new
+# undescribed commit and leave the bump in the parent (seen on pi-memory
+# v1.0.0: the tag pointed at a descriptionless commit). Instead, describe
+# the empty @ FIRST, then `jj commit` folds the bump into that described
+# commit — the tag lands on a properly-described release commit.
 if [[ -n "${DRY_RUN:-}" ]]; then
-  echo "DRY_RUN: jj tag set $TAG -r main"
+  echo "DRY_RUN: npm version $VERSION --no-git-tag-version"
+  echo "DRY_RUN: jj describe -m 'chore: release $TAG'   # if @ is empty"
+  echo "DRY_RUN: jj commit -m 'chore: release $TAG'      # if @ has changes"
+  echo "DRY_RUN: jj bookmark set main -r @"
+  echo "DRY_RUN: jj tag set $TAG -r @"
   echo "DRY_RUN: jj git push --bookmark main --tag $TAG"
 else
-  jj tag set "$TAG" -r main
+  npm version "$VERSION" --no-git-tag-version
+  if [[ "$(jj status)" == *"working copy has no changes"* ]]; then
+    # Can't happen right after npm version, but guards re-runs.
+    jj describe -m "chore: release $TAG"
+  fi
+  # @ is non-empty (the bump): describe it first if it's the empty
+  # scaffold commit, then fold the bump into it.
+  if [[ "$(jj log -r @ --no-pager -T 'description')" == "" ]]; then
+    jj describe -m "chore: release $TAG"
+  fi
+  jj commit -m "chore: release $TAG"
+  jj bookmark set main -r @
+  jj tag set "$TAG" -r @
   jj git push --bookmark main --tag "$TAG"
 fi
 
