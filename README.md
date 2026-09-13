@@ -122,30 +122,42 @@ When `buffer_state` is absent (e.g. from an older nvim plugin), the handler fall
 
 ### Edit Approval Gate
 
-Before pi's built-in `edit` / `write` tools modify a file, this extension shows a unified diff in pi's TUI as a read-only widget and asks Neovim to approve it. If Neovim is unavailable (no connection, no ack, old plugin), an interactive diff overlay appears in the pi TUI as a fallback.
+The gate intercepts `edit` / `write` tool calls but only for turns that originated from Neovim. Turns typed directly into pi auto-allow (no prompt, no stall). The gate’s origin flag is set by the inbound `prompt` message handler, cleared on `agent_end`, and dropped on every session boundary (`session_start` / `session_before_switch` / `session_shutdown`) for leak-proofing.
 
 ```text
 tool_call(edit|write)
-  ├─ gate: file already approved ("a")? ── yes ─► allow (return undefined)
+  ├─ nvim-originated turn? ── no ─► allow (return undefined)
+  ├─ gate: file already approved ("a")? ── yes ─► allow
   ├─ compute unified diff (generateUnifiedPatch, disk file vs event.input)
-  ├─ render diff widget in pi TUI (read-only, above editor)
   ├─ broadcast approval_request {id, path, tool, diff}
-  │    ├─ nvim renders floating prompt → sends approval_ack {id} (≤1s)
-  │    │    └─ await approval_response {id, decision} — no time limit, Esc aborts
-  │    └─ no ack in 1s (not connected / busy / old nvim / opted out)
-  │         └─ fallback: ctx.ui.custom overlay diff UI in pi TUI (y/a/n/esc)
-  ├─ yes ─► clear widget, allow
-  ├─ all ─► add path to per-file approved set, clear widget, allow
-  └─ no  ─► clear widget, return { block: true, reason: "User rejected edit to <path>" }
+  ├─ race two surfaces:
+  │   ├─ nvim: user answers in Neovim's picker → approval_response {id, decision}
+  │   └─ pi: focused y/a/n prompt replaces the input box (ctx.ui.custom, no overlay)
+  │       y → "yes"  a → "all"  n → "no"  Esc → "cancelled"
+  ├─ first answer wins:
+  │   ├─ yes ─► allow
+  │   ├─ all ─► add path to per-file approved set, allow
+  │   ├─ no  ─► block "User rejected edit to <path>"
+  │   └─ cancelled (Esc) ─► block "Edit approval cancelled"
+  └─ broadcast approval_resolved {id} exactly once
 ```
 
-Per-file "all" decisions are remembered for the duration of the session; a fresh session re-prompts even for previously-approved files. Per-file memory is cleared on `session_start`, `session_before_switch`, and `session_shutdown`.
+The diff is rendered by pi’s built-in edit/write preview in the transcript; we don’t duplicate it. The pi prompt replaces the input box (no overlay) so pi restores the editor when `done()` is called.
+
+Disconnect semantics:
+
+- **nvim disconnects mid-prompt** → the pi prompt **stays open** awaiting the user’s answer. The gate does not resolve the pending request. The user’s local answer is the only way forward.
+- **pi disconnects mid-prompt** → nvim dismisses its picker with a `pi disconnected` message (covered by [pi-bridge.nvim](https://github.com/junkfactory/pi-bridge.nvim)).
+
+Exits from the prompt: `y` / `a` / `n`, Esc (= cancel this edit), or Ctrl+C (= abort the agent turn — handled via `ctx.signal`). No timeouts.
+
+Per-file "all" memory is remembered for the duration of the session; a fresh session re-prompts even for previously-approved files. The memory is cleared on `session_start`, `session_before_switch`, and `session_shutdown`.
 
 Disabling the gate: set `PI_BRIDGE_EDIT_APPROVAL=0` before launching pi. The extension then allows every `edit` / `write` call without prompting (the original behavior).
 
 Bash bypass: the gate only sees `edit` / `write` tool calls — shell mutations (`sed -i`, redirections, …) are invisible to it. To steer the agent toward the gated tools, the extension appends a standing file-editing instruction to every turn's system prompt (`EDIT_TOOL_GUARD` in `src/index.ts`) while the gate is enabled; disabling the gate removes the instruction too.
 
-Headless / RPC modes: when `ctx.hasUI === false` (e.g. `pi -p` or JSON output), the extension auto-approves without rendering a widget — non-interactive workflows aren't blocked. In RPC mode the fallback overlay cannot render; if Neovim also doesn't answer within the 1s ack window, the edit is **blocked** as cancelled (fail-safe, never silently allowed).
+Headless / RPC modes: when `ctx.hasUI === false` (e.g. `pi -p` or JSON output), the extension auto-approves without opening a prompt — non-interactive workflows aren’t blocked. In RPC mode `ctx.ui.custom` returns undefined; the gate treats this as cancelled (block) to preserve the fail-safe semantics.
 
 #### Approval protocol (NDJSON, additive)
 
@@ -156,7 +168,7 @@ Headless / RPC modes: when `ctx.hasUI === false` (e.g. `pi -p` or JSON output), 
 { "type": "approval_response", "id": "<uuid>", "decision": "yes" | "all" | "no" }
 ```
 
-`approval_ack` is the liveness signal — Neovim sends it within 1s of receiving `approval_request`. Once acked, the gate waits indefinitely (bounded only by Esc / agent abort) for `approval_response`. A late `approval_response` after the fallback path has already resolved is ignored.
+`approval_ack` is accepted for older-pi compat but is no longer required — there is no ack window. The gate waits indefinitely (bounded by Ctrl+C / agent abort / session reset) for `approval_response`. Either surface (nvim or pi) can answer first; first-wins.
 
 **pi → Neovim** (gate events):
 
@@ -165,7 +177,7 @@ Headless / RPC modes: when `ctx.hasUI === false` (e.g. `pi -p` or JSON output), 
 { "type": "approval_resolved", "id": "<uuid>" }
 ```
 
-`approval_resolved` is broadcast after every approval cycle (yes/all/no/cancelled/fallback) so Neovim can close any stale floating prompt that lingered past the fallback path.
+`approval_resolved` is broadcast exactly once on every resolution path (yes / all / no / cancelled / disconnect-while-prompt-open) so Neovim can dismiss its picker even when the user answered in pi.
 
 #### Version pairing
 
@@ -174,14 +186,13 @@ This is a **socket protocol change**. Both repos must be tagged at the same vers
 ### Key APIs Used
 
 - `pi.sendUserMessage()` — inject prompt as if typed in TUI
-- `pi.on("session_start", ...)` — open socket
-- `pi.on("session_shutdown", ...)` — close socket
-- `pi.on("agent_start/end", ...)` — push events to Neovim
-- `pi.on("tool_call", ...)` — intercept `edit` / `write` for the approval gate
-- `pi.on("session_before_switch", ...)` — reset per-file approval memory
+- `pi.on("session_start", ...)` — open socket; clears per-file "all" memory + origin flag
+- `pi.on("session_shutdown", ...)` — close socket; clears origin flag
+- `pi.on("session_before_switch", ...)` — clear per-file "all" memory + origin flag
+- `pi.on("agent_start/end", ...)` — push events to Neovim; `agent_end` clears the origin flag
+- `pi.on("tool_call", ...)` — intercept `edit` / `write` for the approval gate (only when origin = nvim)
 - `generateUnifiedPatch(path, old, new)` — diff computation (no extra dep)
-- `ctx.ui.setWidget(key, factory)` — render the diff widget
-- `ctx.ui.custom(factory, { overlay: true })` — fallback diff overlay
+- `ctx.ui.custom(factory)` — replace the input box with the focused y/a/n prompt (non-overlay; pi restores the editor when `done()` is called)
 - `ctx.signal` — agent abort signal; abort cancels the pending request
 - `ctx.hasUI` — gate for headless modes (auto-approve when false)
 

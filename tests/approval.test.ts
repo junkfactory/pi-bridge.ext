@@ -1,3 +1,17 @@
+/**
+ * Tests for the approval gate state machine.
+ *
+ * Covers the redesign:
+ *   - Per-file "all" memory
+ *   - Queue serialization (first-wins from nvim OR the caller feeds a decision)
+ *   - Response routing + late-answer discard
+ *   - Session reset
+ *   - Abort signal
+ *   - handleDisconnect is a NO-OP (pi prompt stays open)
+ *
+ * The redesign removed: ack timer, fallback decision, settle(), onRequestStart.
+ */
+
 import { describe, expect, it, vi } from "vitest";
 import { createGate } from "../src/approval.js";
 import type { ApprovalTool } from "../src/protocol.js";
@@ -18,7 +32,7 @@ function args(
 	};
 }
 
-/** Convenience: extract just the result from the new outcome shape. */
+/** Convenience: extract just the result from the outcome shape. */
 async function requestResult(gate: ReturnType<typeof createGate>, a = args()) {
 	const { result } = await gate.requestApproval(a);
 	return result;
@@ -29,18 +43,11 @@ describe("createGate — per-file memory", () => {
 		const broadcast = vi.fn();
 		const gate = createGate({ broadcast });
 
-		// Simulate an ack-then-response flow ending in "all". The first
-		// request broadcasts after a microtask, so await the broadcast.
 		const p1 = gate.requestApproval(args({ path: "/tmp/a.ts" }));
 		await waitForCall(broadcast);
 		const id = extractId(broadcast);
-		gate.handleAck(id);
 		gate.handleResponse(id, "all");
 		expect((await p1).result).toBe("all");
-
-		// Manually persist via settle() since `handleResponse` doesn't
-		// know to remember the path; the caller (or test) does.
-		gate.settle(id, "all", "/tmp/a.ts");
 
 		// Subsequent request to the same path resolves immediately, without
 		// broadcasting another approval_request.
@@ -57,7 +64,6 @@ describe("createGate — per-file memory", () => {
 		const p1 = gate.requestApproval(args({ path: "/tmp/b.ts" }));
 		await waitForCall(broadcast);
 		const id = extractId(broadcast);
-		gate.handleAck(id);
 		gate.handleResponse(id, "yes");
 		expect((await p1).result).toBe("yes");
 
@@ -65,9 +71,7 @@ describe("createGate — per-file memory", () => {
 		const before = broadcast.mock.calls.length;
 		const p2 = gate.requestApproval(args({ path: "/tmp/b.ts" }));
 		await waitForCount(broadcast, before + 1);
-		// Clean up so the test doesn't hang on the ack timer.
 		const id2 = extractId(broadcast, before);
-		gate.handleAck(id2);
 		gate.handleResponse(id2, "no");
 		expect((await p2).result).toBe("no");
 	});
@@ -79,27 +83,37 @@ describe("createGate — per-file memory", () => {
 		const p1 = gate.requestApproval(args({ path: "/tmp/c.ts" }));
 		await waitForCall(broadcast);
 		const id1 = extractId(broadcast);
-		gate.handleAck(id1);
 		gate.handleResponse(id1, "all");
 		expect((await p1).result).toBe("all");
-		// Persist for memory.
-		gate.settle(id1, "all", "/tmp/c.ts");
 
 		const before = broadcast.mock.calls.length;
 		const p2 = gate.requestApproval(args({ path: "/tmp/d.ts" }));
 		await waitForCount(broadcast, before + 1);
-		// Cleanup so the test doesn't hang on the timer.
 		const id2 = extractId(broadcast, before);
-		gate.handleAck(id2);
 		gate.handleResponse(id2, "no");
 		expect((await p2).result).toBe("no");
+	});
+});
+
+describe("createGate — caller-supplied id", () => {
+	it("uses the id passed in args instead of generating one", async () => {
+		const broadcast = vi.fn();
+		const gate = createGate({ broadcast });
+		const customId = "caller-supplied-id-1234";
+		const p = gate.requestApproval(args({ id: customId }));
+		await waitForCall(broadcast);
+		const broadcastId = JSON.parse(broadcast.mock.calls[0][0].trim()).id;
+		expect(broadcastId).toBe(customId);
+		gate.handleResponse(customId, "yes");
+		expect((await p).id).toBe(customId);
+		expect((await p).result).toBe("yes");
 	});
 });
 
 describe("createGate — queue ordering", () => {
 	it("serializes concurrent requests so they resolve in order", async () => {
 		const broadcast = vi.fn();
-		const gate = createGate({ broadcast, ackTimeoutMs: 60_000 });
+		const gate = createGate({ broadcast });
 
 		const order: string[] = [];
 		const p1 = gate.requestApproval(args({ path: "/tmp/q1.ts" })).then((o) => {
@@ -121,7 +135,6 @@ describe("createGate — queue ordering", () => {
 		expect(broadcast.mock.calls).toHaveLength(1);
 		const req1 = JSON.parse(broadcast.mock.calls[0][0].trim());
 		expect(req1.path).toBe("/tmp/q1.ts");
-		gate.handleAck(req1.id);
 		gate.handleResponse(req1.id, "yes");
 		await p1;
 
@@ -129,7 +142,6 @@ describe("createGate — queue ordering", () => {
 		await waitForCount(broadcast, 2);
 		const req2 = JSON.parse(broadcast.mock.calls[1][0].trim());
 		expect(req2.path).toBe("/tmp/q2.ts");
-		gate.handleAck(req2.id);
 		gate.handleResponse(req2.id, "yes");
 		await p2;
 
@@ -137,7 +149,6 @@ describe("createGate — queue ordering", () => {
 		await waitForCount(broadcast, 3);
 		const req3 = JSON.parse(broadcast.mock.calls[2][0].trim());
 		expect(req3.path).toBe("/tmp/q3.ts");
-		gate.handleAck(req3.id);
 		gate.handleResponse(req3.id, "yes");
 		await p3;
 
@@ -145,90 +156,115 @@ describe("createGate — queue ordering", () => {
 	});
 });
 
-describe("createGate — ack window", () => {
-	it("waits indefinitely for a response after ack", async () => {
+describe("createGate — response routing", () => {
+	it("ignores responses for unknown ids", async () => {
 		const broadcast = vi.fn();
-		const gate = createGate({ broadcast, ackTimeoutMs: 30 });
+		const gate = createGate({ broadcast });
 
 		const p = gate.requestApproval(args());
 		await waitForCall(broadcast);
-		const id = extractId(broadcast);
-		// Ack before the timeout elapses.
-		await new Promise((r) => setTimeout(r, 10));
-		gate.handleAck(id);
 
-		// Wait much longer than the ack window: must NOT resolve.
-		await new Promise((r) => setTimeout(r, 100));
-		// Now send a response.
+		// Wrong id must not affect the pending request.
+		expect(() => gate.handleResponse("not-an-id", "yes")).not.toThrow();
+		expect(
+			(
+				await Promise.race([
+					p,
+					new Promise((r) => setTimeout(() => r("still-pending"), 30)),
+				])
+			).toString(),
+		).toBe("still-pending");
+
+		// Real id settles it.
+		const id = extractId(broadcast);
 		gate.handleResponse(id, "yes");
 		expect((await p).result).toBe("yes");
 	});
 
-	it("falls back when no ack arrives within the window", async () => {
+	it("ignores a late response after the request has settled", async () => {
 		const broadcast = vi.fn();
-		// Attach listener via a fresh instance so it sees the resolved id.
+		const gate = createGate({ broadcast });
+
+		const p = gate.requestApproval(args());
+		await waitForCall(broadcast);
+		const id = extractId(broadcast);
+		gate.handleResponse(id, "yes");
+		expect((await p).result).toBe("yes");
+
+		// Late response after settlement: no-op, no exception.
+		expect(() => gate.handleResponse(id, "no")).not.toThrow();
+		expect(() => gate.handleResponse(id, "all")).not.toThrow();
+	});
+
+	it("broadcasts approval_resolved exactly once on settlement via onResolved", async () => {
+		const broadcast = vi.fn();
 		const observed: string[] = [];
 		const gate = createGate({
 			broadcast,
-			ackTimeoutMs: 20,
 			onResolved: (id) => observed.push(id),
 		});
 
 		const p = gate.requestApproval(args());
 		await waitForCall(broadcast);
-		expect((await p).result).toBe("fallback");
-		// onResolved must have fired with the same id we broadcast.
-		const id = JSON.parse(broadcast.mock.calls[0][0].trim()).id;
+		const id = extractId(broadcast);
+		gate.handleResponse(id, "yes");
+		await p;
+
 		expect(observed).toEqual([id]);
-	});
-
-	it("ignores a late response after the fallback has resolved", async () => {
-		const broadcast = vi.fn();
-		const gate = createGate({ broadcast, ackTimeoutMs: 20 });
-
-		const p = gate.requestApproval(args());
-		await waitForCall(broadcast);
-		expect((await p).result).toBe("fallback");
-
-		// A late ack + response must not throw or change anything.
-		const id = JSON.parse(broadcast.mock.calls[0][0].trim()).id;
-		expect(() => gate.handleAck(id)).not.toThrow();
-		expect(() => gate.handleResponse(id, "yes")).not.toThrow();
+		expect(observed).toHaveLength(1);
 	});
 });
 
-describe("createGate — disconnect", () => {
-	it("releases an unacked pending request to 'fallback' on disconnect", async () => {
+describe("createGate — handleDisconnect is a no-op", () => {
+	it("does not resolve a pending request when the socket disconnects", async () => {
 		const broadcast = vi.fn();
-		const gate = createGate({ broadcast, ackTimeoutMs: 60_000 });
+		const gate = createGate({ broadcast });
 
 		const p = gate.requestApproval(args());
 		await waitForCall(broadcast);
-		const id = JSON.parse(broadcast.mock.calls[0][0].trim()).id;
-		// No ack yet.
+
+		// The socket disconnecting mid-request must NOT settle it — the
+		// pi-side prompt stays open awaiting the user's answer.
 		gate.handleDisconnect();
-		expect((await p).result).toBe("fallback");
 
-		// Late ack/response after disconnect should be ignored (first wins).
-		expect(() => gate.handleAck(id)).not.toThrow();
-		expect(() => gate.handleResponse(id, "yes")).not.toThrow();
-	});
+		// Wait past one microtask + a tick — would be enough to surface a
+		// stray resolution if handleDisconnect accidentally fired one.
+		await new Promise((r) => setTimeout(r, 20));
+		const settled = await Promise.race([
+			p.then((o) => o.result),
+			new Promise<string>((r) => setTimeout(() => r("still-pending"), 0)),
+		]);
+		expect(settled).toBe("still-pending");
 
-	it("also releases an already-acked pending request on disconnect", async () => {
-		const broadcast = vi.fn();
-		const gate = createGate({ broadcast, ackTimeoutMs: 60_000 });
-
-		const p = gate.requestApproval(args());
-		await waitForCall(broadcast);
-		const id = JSON.parse(broadcast.mock.calls[0][0].trim()).id;
-		gate.handleAck(id);
-		gate.handleDisconnect();
-		expect((await p).result).toBe("fallback");
+		// The user's pi-side answer still settles it.
+		const id = extractId(broadcast);
+		gate.handleResponse(id, "yes");
+		expect((await p).result).toBe("yes");
 	});
 
 	it("is a noop when no request is pending", () => {
 		const gate = createGate({ broadcast: vi.fn() });
 		expect(() => gate.handleDisconnect()).not.toThrow();
+	});
+
+	it("does not fire onResolved on disconnect", async () => {
+		const broadcast = vi.fn();
+		const observed: string[] = [];
+		const gate = createGate({
+			broadcast,
+			onResolved: (id) => observed.push(id),
+		});
+
+		const p = gate.requestApproval(args());
+		await waitForCall(broadcast);
+		gate.handleDisconnect();
+		await new Promise((r) => setTimeout(r, 20));
+		expect(observed).toEqual([]);
+
+		// Cleanup so the test exits cleanly.
+		const id = extractId(broadcast);
+		gate.handleResponse(id, "yes");
+		await p;
 	});
 });
 
@@ -240,10 +276,8 @@ describe("createGate — reset", () => {
 		const p1 = gate.requestApproval(args({ path: "/tmp/r.ts" }));
 		await waitForCall(broadcast);
 		const id1 = extractId(broadcast);
-		gate.handleAck(id1);
 		gate.handleResponse(id1, "all");
 		expect((await p1).result).toBe("all");
-		gate.settle(id1, "all", "/tmp/r.ts");
 
 		gate.reset();
 
@@ -252,19 +286,16 @@ describe("createGate — reset", () => {
 		const p2 = gate.requestApproval(args({ path: "/tmp/r.ts" }));
 		await waitForCount(broadcast, before + 1);
 
-		// Cleanup so the timer doesn't keep this test alive.
 		const id2 = JSON.parse(broadcast.mock.calls[before][0].trim()).id;
-		gate.handleAck(id2);
 		gate.handleResponse(id2, "no");
 		expect((await p2).result).toBe("no");
 	});
 
 	it("cancels any in-flight pending request", async () => {
 		const broadcast = vi.fn();
-		const gate = createGate({ broadcast, ackTimeoutMs: 60_000 });
+		const gate = createGate({ broadcast });
 
 		const p = gate.requestApproval(args());
-		// Wait for the broadcast to happen (so we know runOne is active).
 		await waitForCall(broadcast);
 		gate.reset();
 		expect((await p).result).toBe("cancelled");
@@ -272,9 +303,9 @@ describe("createGate — reset", () => {
 });
 
 describe("createGate — signal abort", () => {
-	it("cancels a pending request when the agent aborts before the ack", async () => {
+	it("cancels a pending request when the agent aborts before settlement", async () => {
 		const broadcast = vi.fn();
-		const gate = createGate({ broadcast, ackTimeoutMs: 60_000 });
+		const gate = createGate({ broadcast });
 
 		const ac = new AbortController();
 		const p = gate.requestApproval(args({ signal: ac.signal }));
@@ -284,7 +315,7 @@ describe("createGate — signal abort", () => {
 
 	it("resolves immediately as cancelled when the signal is already aborted", async () => {
 		const broadcast = vi.fn();
-		const gate = createGate({ broadcast, ackTimeoutMs: 60_000 });
+		const gate = createGate({ broadcast });
 
 		const ac = new AbortController();
 		ac.abort();
@@ -293,29 +324,52 @@ describe("createGate — signal abort", () => {
 	});
 });
 
-describe("createGate — settle", () => {
-	it("records 'all' for the matching fallback and resolves subsequent requests immediately", async () => {
+describe("createGate — handleAck (compat)", () => {
+	it("is a no-op (no ack window) — does not affect the pending request", async () => {
 		const broadcast = vi.fn();
-		const gate = createGate({ broadcast, ackTimeoutMs: 20 });
+		const gate = createGate({ broadcast });
 
-		// Drive a fallback path: no ack, then settle with "all".
-		const p1 = gate.requestApproval(args({ path: "/tmp/s.ts" }));
+		const p = gate.requestApproval(args());
 		await waitForCall(broadcast);
 		const id = extractId(broadcast);
-		expect((await p1).result).toBe("fallback");
-		gate.settle(id, "all", "/tmp/s.ts");
+		// ack is accepted for older-nvim compat but doesn't change behavior.
+		expect(() => gate.handleAck(id)).not.toThrow();
 
-		// The path is remembered; no broadcast for the next request.
-		const before = broadcast.mock.calls.length;
-		const r2 = await requestResult(gate, args({ path: "/tmp/s.ts" }));
-		expect(r2).toBe("all");
-		expect(broadcast.mock.calls.length).toBe(before);
+		gate.handleResponse(id, "yes");
+		expect((await p).result).toBe("yes");
+	});
+});
+
+describe("createGate — session reset", () => {
+	it("short-circuits queued requests across a reset without broadcasting", async () => {
+		const broadcast = vi.fn();
+		const gate = createGate({ broadcast });
+
+		// Two requests: r1 becomes pending, r2 queues behind it.
+		const p1 = gate.requestApproval(args({ path: "/tmp/a.ts" }));
+		const p2 = gate.requestApproval(args({ path: "/tmp/b.ts" }));
+		await waitForCount(broadcast, 1);
+
+		// Reset (session switch) while both are in flight: r1 resolves
+		// cancelled, r2 short-circuits without broadcasting a new request.
+		gate.reset();
+		const [r1, r2] = await Promise.all([p1, p2]);
+		expect(r1.result).toBe("cancelled");
+		expect(r2.result).toBe("cancelled");
+		expect(r2.id).toBe("");
+		expect(broadcast).toHaveBeenCalledTimes(1);
 	});
 
-	it("ignores settle for unknown ids", () => {
-		const _broadcast = vi.fn();
-		const gate = createGate({ broadcast: vi.fn() });
-		expect(() => gate.settle("not-an-id", "yes", "/tmp/x.ts")).not.toThrow();
+	it("new requests after a reset broadcast normally", async () => {
+		const broadcast = vi.fn();
+		const gate = createGate({ broadcast });
+		gate.reset();
+		const p = gate.requestApproval(args({ path: "/tmp/c.ts" }));
+		await waitForCall(broadcast);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+		const id = extractId(broadcast);
+		gate.handleResponse(id, "yes");
+		expect((await p).result).toBe("yes");
 	});
 });
 
@@ -358,37 +412,3 @@ function waitForCount(
 		check();
 	});
 }
-
-describe("createGate — session reset", () => {
-	it("short-circuits queued requests across a reset without broadcasting", async () => {
-		const broadcast = vi.fn();
-		const gate = createGate({ broadcast });
-
-		// Two requests: r1 becomes pending, r2 queues behind it.
-		const p1 = gate.requestApproval(args({ path: "/tmp/a.ts" }));
-		const p2 = gate.requestApproval(args({ path: "/tmp/b.ts" }));
-		await waitForCount(broadcast, 1);
-
-		// Reset (session switch) while both are in flight: r1 resolves
-		// cancelled, r2 short-circuits without broadcasting a new request.
-		gate.reset();
-		const [r1, r2] = await Promise.all([p1, p2]);
-		expect(r1.result).toBe("cancelled");
-		expect(r2.result).toBe("cancelled");
-		expect(r2.id).toBe("");
-		expect(broadcast).toHaveBeenCalledTimes(1);
-	});
-
-	it("new requests after a reset broadcast normally", async () => {
-		const broadcast = vi.fn();
-		const gate = createGate({ broadcast });
-		gate.reset();
-		const p = gate.requestApproval(args({ path: "/tmp/c.ts" }));
-		await waitForCall(broadcast);
-		expect(broadcast).toHaveBeenCalledTimes(1);
-		const id = extractId(broadcast);
-		gate.handleAck(id);
-		gate.handleResponse(id, "yes");
-		expect((await p).result).toBe("yes");
-	});
-});

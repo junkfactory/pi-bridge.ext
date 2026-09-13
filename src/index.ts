@@ -6,10 +6,10 @@
  * pi-bridge.nvim, and injects them into the pi session.
  *
  * Also implements the edit-approval gate: before pi's built-in `edit` and
- * `write` tools modify a file, a diff preview is shown in the pi TUI and
- * approval is requested via the bridge socket (Neovim) — falling back to
- * an interactive pi-TUI overlay after a 1s ack window when Neovim is
- * unavailable. Disable via `PI_BRIDGE_EDIT_APPROVAL=0`.
+ * `write` tools modify a file, approval is requested via the bridge
+ * socket (Neovim) — and, in parallel, a focused `y / a(ll this file) / n`
+ * prompt replaces pi's input box so the user can answer locally. Disable
+ * via `PI_BRIDGE_EDIT_APPROVAL=0`.
  */
 
 /**
@@ -25,6 +25,7 @@ export const EDIT_TOOL_GUARD = [
 	"edit/write calls show a diff preview for user approval; shell mutations bypass it.",
 ].join("\n");
 
+import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type {
 	AgentEndEvent,
@@ -45,7 +46,29 @@ import { ensureSocketDir, socketPath } from "./path.js";
 import type { ErrorCode, OutboundEvent } from "./protocol.js";
 import { parseMessage, serializeEvent } from "./protocol.js";
 import { broadcast, setOnDisconnect, start, stop } from "./socket.js";
-import { clearDiffWidget, diffOverlay, showApprovalHint } from "./ui.js";
+import { type PromptDecision, promptSelection } from "./ui.js";
+
+/**
+ * Origin flag: set true when the current agent turn was started by an
+ * inbound Neovim `prompt` message, and cleared on session/agent
+ * boundaries. The edit-approval gate uses this to skip the prompt
+ * entirely for turns the user typed directly into pi — those edits
+ * auto-allow with no TUI surface.
+ *
+ * Stored on globalThis so the value survives module reloads (jiti
+ * re-evaluates the extension factory more than once per process), and
+ * so tests can reset it between cases without a separate test-only
+ * export.
+ */
+const globalScopeForOrigin = globalThis as typeof globalThis & {
+	__piBridgeNvimTurnActive?: boolean;
+};
+function getNvimTurnActive(): boolean {
+	return globalScopeForOrigin.__piBridgeNvimTurnActive === true;
+}
+function setNvimTurnActive(v: boolean): void {
+	globalScopeForOrigin.__piBridgeNvimTurnActive = v;
+}
 
 /**
  * Map of ExtensionAPI instances by sessionId, shared across jiti module
@@ -97,13 +120,15 @@ function getGate(): Gate {
 		globalScope.__piBridgeGate = createGate({
 			broadcast: (data) => broadcast(data),
 			onResolved: (id) => {
-				// Tell Neovim the request is settled so any stale float
-				// (prompt shown after the fallback path resolved) can close.
+				// Tell Neovim the request is settled so its picker can
+				// dismiss even when the user answered in pi.
 				broadcast(serializeEvent({ type: "approval_resolved", id }));
 			},
 		});
-		// Wire socket disconnects to the gate so a half-open prompt
-		// falls back to the pi overlay rather than hanging.
+		// Wire socket disconnects to the gate. The gate's handleDisconnect is
+		// a no-op for the pending request itself — the pi prompt stays open
+		// awaiting the user's answer; we just give the gate a chance to log
+		// if it ever needs to.
 		setOnDisconnect(() => {
 			globalScope.__piBridgeGate?.handleDisconnect();
 		});
@@ -116,6 +141,9 @@ function resetGate(): void {
 	if (globalScope.__piBridgeGate) {
 		globalScope.__piBridgeGate.reset();
 	}
+	// Session boundaries always clear the origin flag — a fresh session
+	// starts in pi-typed mode until nvim sends a new prompt.
+	setNvimTurnActive(false);
 }
 
 export function buildStartMessage(ctx: ExtensionContext): string {
@@ -186,6 +214,30 @@ function buildEndMessage(event: AgentEndEvent): string {
 	return result;
 }
 
+/**
+ * Map an ApprovalResult (from the gate) or a PromptDecision (from the
+ * pi-side prompt) to a tool_call result. Centralized so both race paths
+ * share the exact same mapping (logs and block reasons).
+ */
+function mapDecision(
+	decision: "yes" | "all" | "no" | "cancelled",
+	path: string,
+	tool: string,
+): ToolCallEventResult | undefined {
+	switch (decision) {
+		case "yes":
+		case "all":
+			info("Edit-approval gate: approved", { path, tool, decision });
+			return undefined;
+		case "no":
+			info("Edit-approval gate: rejected", { path, tool });
+			return { block: true, reason: `User rejected edit to ${path}` };
+		case "cancelled":
+			info("Edit-approval gate: cancelled", { path, tool });
+			return { block: true, reason: "Edit approval cancelled" };
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	// Configure log level from env (default: info)
 	const level = (process.env.PI_BRIDGE_LOG_LEVEL ?? "info") as LogLevel;
@@ -194,6 +246,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		// Edit-approval gate: clear per-file "all" memory at session start
 		// so a new session re-prompts even for previously-approved files.
+		// Also clears the origin flag — a fresh session starts in
+		// pi-typed mode.
 		resetGate();
 
 		const cwd = ctx.cwd ?? process.cwd();
@@ -258,6 +312,11 @@ export default function (pi: ExtensionAPI) {
 						);
 						return;
 					}
+					// Origin flag: an inbound prompt marks the current turn as
+					// nvim-originated so the gate's edit/write path will prompt
+					// instead of auto-allowing. Cleared on agent_end and on
+					// session boundaries.
+					if (message.type === "prompt") setNvimTurnActive(true);
 					handleMessage(active, message);
 					debug("Dispatch succeeded", {
 						type: message.type,
@@ -312,9 +371,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// -----------------------------------------------------------------
-	// Edit-approval gate: intercept edit/write tool calls, show the
-	// user a diff in the pi TUI, ask Neovim to approve, and fall back
-	// to an interactive pi-TUI overlay if Neovim is unavailable.
+	// Edit-approval gate: intercept edit/write tool calls from
+	// nvim-originated turns. Pi-typed turns skip the gate entirely
+	// (the user already saw the prompt in their own input box). When
+	// gated, both the Neovim picker and a focused pi-side prompt are
+	// shown; first answer wins. nvim disconnecting mid-prompt does
+	// not resolve the request — the pi prompt stays open.
 	//
 	// The gate only sees edit/write; agents can still mutate files via
 	// bash (sed -i, redirects, ...). Policing shell commands is
@@ -344,6 +406,11 @@ export default function (pi: ExtensionAPI) {
 			const isWrite = isToolCallEventType("write", event);
 			if (!isEdit && !isWrite) return undefined;
 
+			// Origin gate: edits from turns the user typed directly into pi
+			// auto-allow. Only turns started by an inbound Neovim prompt are
+			// gated — the user already saw nvim's picker.
+			if (!getNvimTurnActive()) return undefined;
+
 			// Headless (print / JSON / RPC) runs have no UI to ask on — auto-
 			// approve so non-interactive workflows aren't blocked.
 			if (!ctx.hasUI) {
@@ -368,77 +435,59 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const gate = getGate();
+			const id = randomUUID();
 
-			// Show a one-line approval hint below the editor. The diff
-			// itself is already rendered by pi's built-in edit/write tool
-			// preview in the transcript — we don't duplicate it. The
-			// fallback overlay paints its own diff when it triggers.
-			showApprovalHint(ctx);
+			// Race the gate's natural settlement (nvim response, abort, or
+			// session reset) against the user's local pi-prompt decision.
+			// First answer wins; the other path is cleaned up best-effort.
+			const gatePromise = gate.requestApproval({
+				id,
+				tool: toolName,
+				path: diffResult.path,
+				diff: diffResult.diff,
+				signal: ctx.signal,
+			});
 
-			let requestId = "";
-			try {
-				const outcome = await gate.requestApproval({
-					tool: toolName,
-					path: diffResult.path,
-					diff: diffResult.diff,
-					signal: ctx.signal,
-				});
-				requestId = outcome.id;
-				let decision = outcome.result;
-
-				if (decision === "fallback") {
-					info("Edit-approval gate: pi-TUI fallback overlay", {
-						path: diffResult.path,
-						tool: toolName,
-					});
-					// In RPC mode ctx.ui.custom() returns undefined — treat that
-					// as a cancelled request (block) rather than falling through
-					// the decision switch and silently allowing the edit.
-					const overlayDecision = await diffOverlay(ctx, diffResult.diff);
-					if (overlayDecision === undefined) {
-						decision = "cancelled";
-					} else {
-						decision = overlayDecision;
-						gate.settle(requestId, decision, diffResult.path);
-					}
+			// Pi-side prompt: independent of the gate's pending state. If
+			// nvim responds while the prompt is up, the gate settles and
+			// broadcasts approval_resolved (dismisses nvim's picker), and
+			// the pi prompt is dismissed below — a late keypress would be
+			// a no-op because handleResponse short-circuits on unknown ids.
+			const prompt = promptSelection(ctx);
+			const promptPromise = prompt.decision.then((decision: PromptDecision) => {
+				// Feed the pi-side decision back through the gate so
+				// per-file memory updates (for "all") and the single
+				// approval_resolved broadcast fire exactly once via
+				// onResolved. Esc cancels the pending request without
+				// marking the path as approved.
+				if (decision === "cancelled") {
+					gate.handleCancel(id);
+				} else {
+					gate.handleResponse(id, decision);
 				}
+				return decision;
+			});
 
-				// Map the decision to a tool_call result.
-				switch (decision) {
-					case "yes":
-					case "all":
-						info("Edit-approval gate: approved", {
-							path: diffResult.path,
-							tool: toolName,
-							decision,
-						});
-						return undefined;
-					case "no":
-						info("Edit-approval gate: rejected", {
-							path: diffResult.path,
-							tool: toolName,
-						});
-						return {
-							block: true,
-							reason: `User rejected edit to ${diffResult.path}`,
-						};
-					case "cancelled":
-						info("Edit-approval gate: cancelled", {
-							path: diffResult.path,
-							tool: toolName,
-						});
-						return { block: true, reason: "Edit approval cancelled" };
-				}
-			} finally {
-				// Always clear the widget and broadcast approval_resolved so
-				// Neovim can close any stale float, even if the agent aborted.
-				clearDiffWidget(ctx);
-				if (requestId) {
-					broadcast(
-						serializeEvent({ type: "approval_resolved", id: requestId }),
-					);
-				}
+			// Await whichever settles first. The loser keeps running but
+			// its eventual resolution is ignored (gate.handleResponse
+			// no-ops on unknown ids; the prompt just resolves to a
+			// discarded decision).
+			const winner = await Promise.race([
+				gatePromise.then((o) => ({ kind: "gate" as const, ...o })),
+				promptPromise.then((d) => ({ kind: "pi" as const, decision: d })),
+			]);
+
+			if (winner.kind === "gate") {
+				// The gate settled first (nvim answered, Ctrl+C abort, or a
+				// session reset) — tear the pi prompt down so the editor is
+				// restored. The prompt's late "cancelled" feeds handleCancel,
+				// which no-ops (first-wins).
+				prompt.dismiss();
+				return mapDecision(winner.result, diffResult.path, toolName);
 			}
+			// Pi won — the gate already settled (via our handleResponse
+			// call above) before Promise.race returned.
+			return mapDecision(winner.decision, diffResult.path, toolName);
 		},
 	);
 
@@ -458,9 +507,13 @@ export default function (pi: ExtensionAPI) {
 		broadcast(serializeEvent(event));
 	});
 
-	pi.on("agent_end", (_event, ctx) => {
-		const cwd = ctx.cwd ?? process.cwd();
-		const sessionId = ctx.sessionManager.getSessionId();
+	pi.on("agent_end", (_event, _ctx) => {
+		// End of the nvim-originated turn — drop the origin flag so any
+		// follow-up edits typed directly in pi auto-allow again.
+		setNvimTurnActive(false);
+
+		const cwd = _ctx.cwd ?? process.cwd();
+		const sessionId = _ctx.sessionManager.getSessionId();
 		const event: OutboundEvent = {
 			type: "agent_end",
 			message: buildEndMessage(_event),
@@ -468,17 +521,17 @@ export default function (pi: ExtensionAPI) {
 		info("Agent completed", {
 			cwd,
 			sessionId,
-			model: ctx.model?.name,
+			model: _ctx.model?.name,
 			ownerSessionId: globalScope.__piBridgeOwnerSessionId,
 		});
 		broadcast(serializeEvent(event));
 	});
 
 	// -----------------------------------------------------------------
-	// Edit-approval gate: clear per-file "all" memory at session
-	// boundaries so a fresh session re-prompts even for files the
-	// previous session had approved. Hooks ride alongside the existing
-	// session lifecycle handlers — don't replace them.
+	// Edit-approval gate: clear per-file "all" memory + origin flag at
+	// session boundaries so a fresh session re-prompts even for files
+	// the previous session had approved. Hooks ride alongside the
+	// existing session lifecycle handlers — don't replace them.
 	// -----------------------------------------------------------------
 	pi.on("session_before_switch", () => {
 		resetGate();
@@ -488,6 +541,12 @@ export default function (pi: ExtensionAPI) {
 	// requests to settle first on a real quit.
 
 	pi.on("session_shutdown", async (event, ctx) => {
+		// Drop the origin flag on shutdown — leak-proofing. If a child
+		// session shutdown (non-owner) happens, the flag is cleared too,
+		// but the owner's session_start will re-establish it for any
+		// follow-up nvim prompts.
+		setNvimTurnActive(false);
+
 		const sessionId = ctx.sessionManager.getSessionId();
 		getPiMap().delete(sessionId);
 		info("Removed session from pi map", {

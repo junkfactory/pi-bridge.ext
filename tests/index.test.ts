@@ -107,9 +107,11 @@ beforeEach(() => {
 	const g = globalThis as typeof globalThis & {
 		__piBridgeOwnerSessionId?: string | null;
 		__piBridgePiMap?: Map<string, unknown>;
+		__piBridgeNvimTurnActive?: boolean;
 	};
 	g.__piBridgeOwnerSessionId = null;
 	g.__piBridgePiMap = new Map();
+	g.__piBridgeNvimTurnActive = false;
 });
 
 describe("buildStartMessage", () => {
@@ -642,10 +644,11 @@ describe("extension socket lifecycle", () => {
 // Edit-approval gate
 // ---------------------------------------------------------------------------
 
-import type { Gate } from "../src/approval.js";
+import { createGate, type Gate } from "../src/approval.js";
 
 const gateGlobal = globalThis as typeof globalThis & {
 	__piBridgeGate?: Gate | null;
+	__piBridgeNvimTurnActive?: boolean;
 };
 
 function installStubGate(): { gate: Gate; restore: () => void } {
@@ -653,7 +656,7 @@ function installStubGate(): { gate: Gate; restore: () => void } {
 		requestApproval: vi.fn(),
 		handleAck: vi.fn(),
 		handleResponse: vi.fn(),
-		settle: vi.fn(),
+		handleCancel: vi.fn(),
 		handleDisconnect: vi.fn(),
 		reset: vi.fn(),
 	} as unknown as Gate;
@@ -662,21 +665,25 @@ function installStubGate(): { gate: Gate; restore: () => void } {
 	return { gate, restore: () => (gateGlobal.__piBridgeGate = prev ?? null) };
 }
 
-describe("extension — edit-approval gate", () => {
-	it("auto-approves when !ctx.hasUI (headless)", async () => {
-		const { handlers } = registerExtension();
-		const ctx = mockCtx();
-		ctx.hasUI = false;
-		const event = {
-			type: "tool_call",
-			toolCallId: "t1",
-			toolName: "edit",
-			input: { path: "/tmp/x.ts", edits: [{ oldText: "a", newText: "b" }] },
-		};
-		const result = await handlers.tool_call(event, ctx);
-		expect(result).toBeUndefined();
-	});
+/**
+ * Mark the current turn as nvim-originated so the gate's origin check
+ * passes. Tests reset this flag in beforeEach via the gateGlobal.
+ */
+function markNvimTurnActive(): void {
+	gateGlobal.__piBridgeNvimTurnActive = true;
+}
 
+const editEvent = () => ({
+	type: "tool_call",
+	toolCallId: "t1",
+	toolName: "edit",
+	input: {
+		path: new URL(import.meta.url).pathname,
+		edits: [{ oldText: "a", newText: "b" }],
+	},
+});
+
+describe("extension — edit-approval origin gate", () => {
 	it("returns undefined (allow) for non-edit/write tools", async () => {
 		const { handlers } = registerExtension();
 		const event = {
@@ -689,14 +696,26 @@ describe("extension — edit-approval gate", () => {
 		expect(result).toBeUndefined();
 	});
 
-	it("auto-approves an edit with no meaningful preview (no edits, no file)", async () => {
+	it("auto-approves when !ctx.hasUI (headless)", async () => {
+		markNvimTurnActive();
 		const { handlers } = registerExtension();
-		// Path that doesn't exist + empty edits → buildDiff returns null → no preview → allow
+		const ctx = mockCtx();
+		ctx.hasUI = false;
+		const result = await handlers.tool_call(editEvent(), ctx);
+		expect(result).toBeUndefined();
+	});
+
+	it("auto-approves an edit with no meaningful preview (no edits, no file)", async () => {
+		markNvimTurnActive();
+		const { handlers } = registerExtension();
 		const event = {
 			type: "tool_call",
 			toolCallId: "t1",
 			toolName: "edit",
-			input: { path: "/tmp/__definitely_does_not_exist__/ghost.ts", edits: [] },
+			input: {
+				path: "/tmp/__definitely_does_not_exist__/ghost.ts",
+				edits: [],
+			},
 		};
 		const result = await handlers.tool_call(event, mockCtx());
 		expect(result).toBeUndefined();
@@ -706,197 +725,364 @@ describe("extension — edit-approval gate", () => {
 		const prev = process.env.PI_BRIDGE_EDIT_APPROVAL;
 		process.env.PI_BRIDGE_EDIT_APPROVAL = "0";
 		try {
+			markNvimTurnActive();
 			const { handlers } = registerExtension();
-			const event = {
-				type: "tool_call",
-				toolCallId: "t1",
-				toolName: "edit",
-				input: {
-					path: new URL(import.meta.url).pathname,
-					edits: [{ oldText: "a", newText: "b" }],
-				},
-			};
-			const result = await handlers.tool_call(event, mockCtx());
+			const result = await handlers.tool_call(editEvent(), mockCtx());
 			expect(result).toBeUndefined();
 		} finally {
 			process.env.PI_BRIDGE_EDIT_APPROVAL = prev;
 		}
 	});
 
-	it("blocks with a reason when the gate resolves to 'no'", async () => {
+	it("pi-typed edit: origin flag false → gate is never called, no prompt shown", async () => {
+		// Default: nvimTurnActive is false (reset in beforeEach).
 		const { gate, restore } = installStubGate();
 		try {
+			const ctx = mockCtx();
+			const { handlers } = registerExtension();
+			const result = await handlers.tool_call(editEvent(), ctx);
+			expect(result).toBeUndefined();
+			// Gate not touched at all — no request, no broadcast, no prompt.
+			expect(gate.requestApproval).not.toHaveBeenCalled();
+			// No prompt was rendered either.
+			expect(ctx.ui.custom).not.toHaveBeenCalled();
+			expect(ctx.ui.setWidget).not.toHaveBeenCalled();
+		} finally {
+			restore();
+		}
+	});
+
+	it("nvim-originated edit: prompt shown; pi 'yes' routes through gate.handleResponse and allows", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			markNvimTurnActive();
+			// Gate parks the request — it will be settled by the pi
+			// prompt's handleResponse call. The mock records the call.
+			const gatePromise = new Promise<{ id: string; result: string }>(() => {
+				// parked; resolve via the prompt's handleResponse call.
+			});
+			(gate.requestApproval as ReturnType<typeof vi.fn>).mockImplementation(
+				(args: any) => {
+					return gatePromise.then((r) => ({ ...r, id: args.id ?? r.id }));
+				},
+			);
+
+			const ctx = mockCtx();
+			const resolveCustomRef: { current: (decision: any) => void } = {
+				current: () => {},
+			};
+			ctx.ui = {
+				...ctx.ui,
+				custom: vi.fn(
+					() =>
+						new Promise((resolve) => {
+							resolveCustomRef.current = resolve;
+						}),
+				),
+			} as unknown as typeof ctx.ui;
+			const { handlers } = registerExtension();
+			const toolPromise = handlers.tool_call(editEvent(), ctx);
+
+			// Wait for the gate and prompt to be in flight.
+			await Promise.resolve();
+			await Promise.resolve();
+
+			// Pi user picks "yes".
+			resolveCustomRef.current("yes");
+
+			// The pi prompt's .then fires handleResponse, then the
+			// race's winner is the prompt. Wait for the tool result.
+			expect(await toolPromise).toBeUndefined();
+			expect(gate.handleResponse).toHaveBeenCalledWith(
+				expect.stringMatching(/.+/),
+				"yes",
+			);
+		} finally {
+			restore();
+		}
+	});
+
+	it("nvim answer wins the race — pi prompt is shown but ignored; tool returns nvim's decision", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			markNvimTurnActive();
+			// Gate resolves "no" immediately (simulating nvim responded first).
 			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
-				id: "req-1",
+				id: "id-from-caller",
 				result: "no",
 			});
-			const { handlers } = registerExtension();
-			const event = {
-				type: "tool_call",
-				toolCallId: "t1",
-				toolName: "edit",
-				input: {
-					path: new URL(import.meta.url).pathname,
-					edits: [{ oldText: "a", newText: "b" }],
-				},
+
+			// Pi prompt is parked; we never settle it. The test must NOT hang
+			// because the gate's resolution wins the race.
+			const resolveCustomRef: { current: (decision: any) => void } = {
+				current: () => {},
 			};
-			const result = await handlers.tool_call(event, mockCtx());
+			const ctx = mockCtx();
+			ctx.ui = {
+				...ctx.ui,
+				custom: vi.fn(
+					() =>
+						new Promise((resolve) => {
+							resolveCustomRef.current = resolve;
+						}),
+				),
+			} as unknown as typeof ctx.ui;
+			const { handlers } = registerExtension();
+
+			const result = await handlers.tool_call(editEvent(), ctx);
 			expect(result).toEqual({
 				block: true,
 				reason: expect.stringContaining("User rejected edit to"),
 			});
+			// The pi prompt was opened (race happened), but the user's late
+			// answer is never consumed. The gate-win path must dismiss the
+			// prompt: its decision resolves "cancelled" → handleCancel (a
+			// first-wins no-op in the real gate).
+			expect(ctx.ui.custom).toHaveBeenCalledTimes(1);
+			expect(gate.handleResponse).not.toHaveBeenCalled();
+			expect(gate.handleCancel).toHaveBeenCalledWith(
+				expect.stringMatching(/.+/),
+			);
+			// Clean up the dangling prompt so the test exits.
+			resolveCustomRef.current("yes");
 		} finally {
 			restore();
 		}
 	});
 
-	it("blocks with 'Edit approval cancelled' when the gate resolves to 'cancelled'", async () => {
+	it("pi Esc → block 'Edit approval cancelled' and gate.handleCancel is called", async () => {
 		const { gate, restore } = installStubGate();
 		try {
-			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
-				id: "req-1",
-				result: "cancelled",
+			markNvimTurnActive();
+			// Gate parks the request — the pi prompt settles it via
+			// handleCancel, which the mock records.
+			const gatePromise = new Promise<{ id: string; result: string }>(() => {
+				// never resolves externally; the gate mock's handleCancel
+				// call doesn't propagate, so the request stays parked.
 			});
-			const { handlers } = registerExtension();
-			const event = {
-				type: "tool_call",
-				toolCallId: "t1",
-				toolName: "edit",
-				input: {
-					path: new URL(import.meta.url).pathname,
-					edits: [{ oldText: "a", newText: "b" }],
+			(gate.requestApproval as ReturnType<typeof vi.fn>).mockImplementation(
+				(args: any) => {
+					return gatePromise.then((r) => ({ ...r, id: args.id ?? r.id }));
 				},
+			);
+
+			const ctx = mockCtx();
+			const resolveCustomRef: { current: (decision: any) => void } = {
+				current: () => {},
 			};
-			const result = await handlers.tool_call(event, mockCtx());
+			ctx.ui = {
+				...ctx.ui,
+				custom: vi.fn(
+					() =>
+						new Promise((resolve) => {
+							resolveCustomRef.current = resolve;
+						}),
+				),
+			} as unknown as typeof ctx.ui;
+			const { handlers } = registerExtension();
+			const toolPromise = handlers.tool_call(editEvent(), ctx);
+
+			await Promise.resolve();
+			// Pi user presses Esc.
+			resolveCustomRef.current("cancelled");
+
+			// Wait for the promptPromise to settle.
+			const result = await toolPromise;
 			expect(result).toEqual({
 				block: true,
 				reason: "Edit approval cancelled",
 			});
+			// Esc routes to handleCancel so the gate settles as cancelled
+			// (per-file memory is not updated).
+			expect(gate.handleCancel).toHaveBeenCalledWith(
+				expect.stringMatching(/.+/),
+			);
+			expect(gate.handleResponse).not.toHaveBeenCalled();
 		} finally {
 			restore();
 		}
 	});
 
-	it("shows the approval hint below the editor during the approval gate", async () => {
+	it("RPC mode: custom returns undefined → blocked as 'Edit approval cancelled'", async () => {
 		const { gate, restore } = installStubGate();
 		try {
-			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
-				id: "req-1",
-				result: "yes",
-			});
-			const { handlers } = registerExtension();
-			const ctx = mockCtx();
-			const event = {
-				type: "tool_call",
-				toolCallId: "t1",
-				toolName: "edit",
-				input: {
-					path: new URL(import.meta.url).pathname,
-					edits: [{ oldText: "a", newText: "b" }],
+			markNvimTurnActive();
+			// Gate never resolves — the rpc ui.custom returning undefined
+			// is what should drive the cancellation.
+			let releaseGate!: (result: { id: string; result: string }) => void;
+			const gatePromise = new Promise<{ id: string; result: string }>(
+				(resolve) => {
+					releaseGate = resolve;
 				},
-			};
-			await handlers.tool_call(event, ctx);
-			expect(ctx.ui.setWidget).toHaveBeenCalledWith(
-				"pi-bridge-approval",
-				["approve: y / a(ll this file) / n — here or in Neovim"],
-				{ placement: "belowEditor" },
 			);
-		} finally {
-			restore();
-		}
-	});
-
-	it("calls gate.settle on the fallback path with the overlay decision", async () => {
-		const { gate, restore } = installStubGate();
-		// The mock ctx must expose ui.custom that resolves with a decision.
-		const mockCtxWithOverlay = () => {
-			const ctx = mockCtx();
-			ctx.ui = {
-				...ctx.ui,
-				custom: vi.fn().mockResolvedValue("yes"),
-				setWidget: vi.fn(),
-			} as unknown as typeof ctx.ui;
-			return ctx;
-		};
-		try {
-			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
-				id: "req-1",
-				result: "fallback",
-			});
-			const { handlers } = registerExtension();
-			const event = {
-				type: "tool_call",
-				toolCallId: "t1",
-				toolName: "edit",
-				input: {
-					path: new URL(import.meta.url).pathname,
-					edits: [{ oldText: "a", newText: "b" }],
+			(gate.requestApproval as ReturnType<typeof vi.fn>).mockImplementation(
+				(args: any) => {
+					return gatePromise.then((r) => ({ ...r, id: args.id ?? r.id }));
 				},
-			};
-			const result = await handlers.tool_call(event, mockCtxWithOverlay());
-			expect(gate.settle).toHaveBeenCalledWith(
-				"req-1",
-				"yes",
-				expect.stringContaining("index.test.ts"),
 			);
-			expect(result).toBeUndefined();
-		} finally {
-			restore();
-		}
-	});
-
-	it("blocks as cancelled when the fallback overlay cannot run (RPC mode returns undefined)", async () => {
-		const { gate, restore } = installStubGate();
-		const ctxRpcOverlay = () => {
 			const ctx = mockCtx();
 			ctx.ui = {
 				...ctx.ui,
 				custom: vi.fn().mockResolvedValue(undefined),
-				setWidget: vi.fn(),
 			} as unknown as typeof ctx.ui;
-			return ctx;
-		};
-		try {
-			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
-				id: "req-1",
-				result: "fallback",
-			});
 			const { handlers } = registerExtension();
-			const event = {
-				type: "tool_call",
-				toolCallId: "t1",
-				toolName: "edit",
-				input: {
-					path: new URL(import.meta.url).pathname,
-					edits: [{ oldText: "a", newText: "b" }],
-				},
-			};
-			const result = await handlers.tool_call(event, ctxRpcOverlay());
+			const toolPromise = handlers.tool_call(editEvent(), ctx);
+			// Let the RPC path resolve.
+			await new Promise((r) => setTimeout(r, 0));
+			const result = await toolPromise;
 			expect(result).toEqual({
 				block: true,
 				reason: "Edit approval cancelled",
 			});
-			// No decision was made, so per-file memory must not be updated.
-			expect(gate.settle).not.toHaveBeenCalled();
+			expect(gate.handleCancel).toHaveBeenCalledWith(
+				expect.stringMatching(/.+/),
+			);
+			// Cleanup so the dangling gate promise resolves.
+			releaseGate({ id: "ignored", result: "cancelled" });
 		} finally {
 			restore();
 		}
 	});
 
-	it("resets the gate on session_start", async () => {
+	it("resets the gate (and origin flag) on session_start", async () => {
 		const { gate, restore } = installStubGate();
 		try {
+			markNvimTurnActive();
 			const { handlers } = registerExtension();
 			await handlers.session_start(
 				{ type: "session_start", reason: "startup" },
 				mockCtx(),
 			);
 			expect(gate.reset).toHaveBeenCalled();
+			// Origin flag must be cleared by session_start (leak-proofing).
+			expect(gateGlobal.__piBridgeNvimTurnActive).not.toBe(true);
 		} finally {
 			restore();
 		}
 	});
 });
+
+describe("extension — origin flag lifecycle", () => {
+	it("is cleared on agent_end", async () => {
+		markNvimTurnActive();
+		const { handlers } = registerExtension();
+		await handlers.agent_end({ messages: [] }, mockCtx());
+		expect(gateGlobal.__piBridgeNvimTurnActive).not.toBe(true);
+	});
+
+	it("is cleared on session_before_switch", async () => {
+		markNvimTurnActive();
+		const { handlers } = registerExtension();
+		await handlers.session_before_switch({});
+		expect(gateGlobal.__piBridgeNvimTurnActive).not.toBe(true);
+	});
+
+	it("is cleared on session_start", async () => {
+		markNvimTurnActive();
+		const { handlers } = registerExtension();
+		await handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(),
+		);
+		expect(gateGlobal.__piBridgeNvimTurnActive).not.toBe(true);
+	});
+
+	it("is cleared on session_shutdown", async () => {
+		markNvimTurnActive();
+		const { handlers } = registerExtension();
+		await handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "quit" },
+			mockCtx(),
+		);
+		expect(gateGlobal.__piBridgeNvimTurnActive).not.toBe(true);
+	});
+
+	it("is set true on inbound prompt message dispatch", async () => {
+		const { handlers } = registerExtension();
+		// Need a real session_start so the message callback is wired.
+		let onMessage: ((raw: string) => void) | undefined;
+		vi.mocked(start).mockImplementation(async (_path, cb) => {
+			onMessage = cb;
+			return { status: "started" };
+		});
+		await handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(),
+		);
+		expect(gateGlobal.__piBridgeNvimTurnActive).not.toBe(true);
+
+		onMessage?.(
+			JSON.stringify({
+				type: "prompt",
+				text: "hello",
+				context: {
+					file: new URL(import.meta.url).pathname,
+					cwd: "/tmp",
+					mode: "normal",
+					buffer_state: "saved",
+				},
+			}),
+		);
+		expect(gateGlobal.__piBridgeNvimTurnActive).toBe(true);
+	});
+});
+
+describe("extension — approval_resolved broadcast", () => {
+	it("is broadcast exactly once when the gate resolves (regardless of source)", async () => {
+		const { broadcast } = await import("../src/socket.js");
+		// Use a fresh broadcast mock for this test so prior tests'
+		// accumulated calls don't confuse the assertions.
+		const localBroadcast = vi.fn();
+		const observed: string[] = [];
+		const onResolved = vi.fn((id: string) => {
+			observed.push(id);
+			// Mirror what the real wiring does: broadcast approval_resolved.
+			localBroadcast(`${JSON.stringify({ type: "approval_resolved", id })}\n`);
+		});
+		const gate = createGate({ broadcast: localBroadcast, onResolved });
+
+		// Simulate a nvim-driven settlement.
+		const p = gate.requestApproval({
+			tool: "edit",
+			path: "/tmp/x.ts",
+			diff: "+x",
+			signal: undefined,
+		});
+		// Wait for the request broadcast to happen.
+		const waitForBroadcast = () =>
+			new Promise<void>((resolve) => {
+				const check = () => {
+					if (localBroadcast.mock.calls.length > 0) {
+						resolve();
+					} else {
+						setTimeout(check, 0);
+					}
+				};
+				check();
+			});
+		await waitForBroadcast();
+		const id = JSON.parse(localBroadcast.mock.calls[0][0].trim()).id;
+		gate.handleResponse(id, "yes");
+		expect((await p).result).toBe("yes");
+
+		expect(observed).toEqual([id]);
+		// Exactly one approval_resolved event broadcast on our local mock.
+		const resolvedCalls = localBroadcast.mock.calls.filter((c) =>
+			(c[0] as string).includes('"type":"approval_resolved"'),
+		);
+		expect(resolvedCalls).toHaveLength(1);
+		// Sanity: the real (mocked) socket broadcast was NOT called by us
+		// — the real wiring does that via the getGate() helper, which
+		// isn't used in this test.
+		expect(broadcast).not.toHaveBeenCalledWith(
+			expect.stringContaining('"type":"approval_resolved"'),
+		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
 
 describe("extension — edit-tool system-prompt guard", () => {
 	it("appends the file-editing guard to every turn's system prompt", async () => {
