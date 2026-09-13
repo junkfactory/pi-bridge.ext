@@ -8,6 +8,7 @@
 #   ./scripts/test-pi.sh pi-subagents             # + pi-subagents by short name
 #   ./scripts/test-pi.sh /path/to/ext/dist/index.js  # + explicit path
 #   PI_BRIDGE_LOG_LEVEL=debug ./scripts/test-pi.sh
+#   PI_BRIDGE_LOG_FILE=/tmp/x.log ./scripts/test-pi.sh   # override default log path
 #
 # Arguments before "--" are extension names/paths; arguments after "--" are
 # passed through to pi verbatim:
@@ -30,6 +31,10 @@ export PI_CODING_AGENT_DIR="${HOME}/.pi/agent"
 
 # Log file location (extension reads PI_BRIDGE_LOG_LEVEL env var)
 export PI_BRIDGE_LOG_LEVEL="${PI_BRIDGE_LOG_LEVEL:-debug}"
+
+# Default test log target (mirrors the nvim harness below); explicit env wins
+export PI_BRIDGE_LOG_FILE="${PI_BRIDGE_LOG_FILE:-/tmp/diff-fix-test/pi-bridge.log}"
+mkdir -p "$(dirname "${PI_BRIDGE_LOG_FILE}")"
 
 # Build extension args: always include local pi-bridge.ext
 EXT_ARGS=(-e "$EXT_DIR/src/index.ts")
@@ -88,7 +93,7 @@ for ((i=0; i<${#EXT_ARGS[@]}; i+=2)); do
   echo "  ${EXT_ARGS[$((i+1))]}"
 done
 echo "Log level:  $PI_BRIDGE_LOG_LEVEL"
-echo "Log file:   ~/.pi/agent/pi-bridge.log"
+echo "Log file:   $PI_BRIDGE_LOG_FILE"
 if ((${#PI_PASSTHROUGH[@]})); then
   echo "pi args:    ${PI_PASSTHROUGH[*]}"
 fi
