@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { handleMessage } from "../src/handler.js";
 import type { Mirror, ResponsePayload } from "../src/prompt_mirror.js";
@@ -239,6 +242,88 @@ describe("handleMessage", () => {
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 		const sent = pi.sendUserMessage.mock.calls[0][0] as string;
 		expect(sent).toContain("does not exist on disk");
+	});
+
+	it("saved buffer + range: label carries range, target unchanged", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				text: "fix this",
+				context: {
+					file: "/home/user/src/main.ts",
+					cwd: "/c",
+					mode: "normal",
+					buffer_state: "saved",
+					range: "3-5",
+				},
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"File: [main.ts:3-5](/home/user/src/main.ts)\n\nfix this",
+			{ deliverAs: "steer" },
+		);
+	});
+
+	it("saved buffer WITHOUT range: byte-identical to existing output", () => {
+		const pi = mockPi();
+		handleMessage(pi, makePrompt());
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"File: [main.ts](/home/user/src/main.ts)\n\nfix this",
+			{ deliverAs: "steer" },
+		);
+	});
+
+	it("hint branch (modified) with range present: unchanged hint, no File: link", () => {
+		const pi = mockPi();
+		handleMessage(
+			pi,
+			makePrompt({
+				context: {
+					file: "/home/user/src/main.ts",
+					cwd: "/c",
+					mode: "normal",
+					buffer_state: "modified",
+					range: "3-5",
+				},
+			}),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		const sent = pi.sendUserMessage.mock.calls[0][0] as string;
+		expect(sent).toContain("unsaved changes");
+		expect(sent).not.toContain("File:");
+		expect(sent).not.toContain("3-5");
+	});
+
+	it("legacy existsSync branch with range: label carries range", () => {
+		const pi = mockPi();
+		// Create a temp file so the legacy existsSync branch sees a real file.
+		const tmpDir = mkdtempSync(join(tmpdir(), "pi-bridge-handler-"));
+		const realPath = join(tmpDir, "main.ts");
+		writeFileSync(realPath, "export const x = 1;\n");
+		try {
+			handleMessage(
+				pi,
+				makePrompt({
+					text: "explain",
+					context: {
+						file: realPath,
+						cwd: "/c",
+						mode: "normal",
+						range: "1-10",
+					},
+				}),
+			);
+			expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+			expect(pi.sendUserMessage).toHaveBeenCalledWith(
+				`File: [main.ts:1-10](${realPath})\n\nexplain`,
+				{ deliverAs: "steer" },
+			);
+		} finally {
+			rmSync(tmpDir, { recursive: true, force: true });
+		}
 	});
 });
 

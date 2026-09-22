@@ -113,6 +113,20 @@ When `buffer_state` is absent (e.g. from an older nvim plugin), the handler fall
 
 Prompts sent while the agent is mid-run are delivered with `deliverAs: "steer"`, so pi redirects the current run instead of erroring; when idle the message starts a normal turn.
 
+#### `context.range` (optional)
+
+Compact line-range string identifying where a `@this` / `@selection` snippet came from in the buffer. The extension appends it to the `File:` link label as `[basename:range](path)` whenever it renders a `File:` link (i.e. the `saved` and `existsSync` branches); hint branches ignore it.
+
+Format: a single start line (`"25"`), a span (`"12-200"`), or a comma-joined list of these (`"25,40-45"`). Line numbers are 1-indexed. Examples:
+
+```json
+{ "range": "25" }        // single line
+{ "range": "12-200" }    // span
+{ "range": "25,40-45" }  // two spans (multiple ranged placeholders in one message)
+```
+
+Invalid values (non-string, malformed) and absence are both treated as "no range" — older senders that don't send the field see no behavioral change. Unknown context fields are also dropped, so a future sender adding more fields will not break older versions of this extension.
+
 **pi → Neovim** (events):
 
 ```json

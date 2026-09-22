@@ -190,6 +190,62 @@ describe("parseMessage", () => {
 			expect(msg.context.buffer_state).toBeUndefined();
 		}
 	});
+
+	it("parses valid range strings", () => {
+		const cases = ["25", "12-200", "25,40-45", "1,2-3,4,5-10"];
+		for (const range of cases) {
+			const msg = parseMessage(
+				JSON.stringify({
+					type: "prompt",
+					text: "hi",
+					context: { ...validPrompt.context, range },
+				}),
+			);
+			expect(msg).not.toBeNull();
+			if (msg?.type === "prompt") {
+				expect(msg.context.range).toBe(range);
+			}
+		}
+	});
+
+	it("drops invalid range strings", () => {
+		const cases = ["abc", "12-", "-5", "25 ", "25,", ",25", "25..30"];
+		for (const range of cases) {
+			const msg = parseMessage(
+				JSON.stringify({
+					type: "prompt",
+					text: "hi",
+					context: { ...validPrompt.context, range },
+				}),
+			);
+			expect(msg).not.toBeNull();
+			if (msg?.type === "prompt") {
+				expect(msg.context.range).toBeUndefined();
+			}
+		}
+	});
+
+	it("drops range when it is not a string (e.g. number)", () => {
+		const msg = parseMessage(
+			JSON.stringify({
+				type: "prompt",
+				text: "hi",
+				context: { ...validPrompt.context, range: 12 },
+			}),
+		);
+		expect(msg).not.toBeNull();
+		if (msg?.type === "prompt") {
+			expect(msg.context.range).toBeUndefined();
+		}
+	});
+
+	it("handles absent range (backward compat)", () => {
+		const msg = parseMessage(JSON.stringify(validPrompt));
+		expect(msg).not.toBeNull();
+		if (msg?.type === "prompt") {
+			expect(msg.context.range).toBeUndefined();
+		}
+	});
 });
 
 // ---------------------------------------------------------------------------

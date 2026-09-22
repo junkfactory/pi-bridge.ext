@@ -58,6 +58,7 @@ export interface PromptMessage {
 		mode: "normal" | "visual";
 		filetype?: string;
 		buffer_state?: "nameless" | "scratch" | "unsaved" | "modified" | "saved";
+		range?: string;
 	};
 }
 
@@ -233,6 +234,13 @@ function parsePromptMessage(
 		if (VALID_BUFFER_STATES.has(state)) {
 			context.buffer_state = state;
 		}
+	}
+
+	if (
+		typeof ctx.range === "string" &&
+		/^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/.test(ctx.range)
+	) {
+		context.range = ctx.range;
 	}
 
 	return { type: "prompt", text: obj.text, context };

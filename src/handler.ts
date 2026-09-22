@@ -114,10 +114,13 @@ function mapUiPromptResponse(
 /**
  * Format a file path as a clickable markdown link.
  * Returns null if the path is empty or not absolute.
+ * When `range` is provided (e.g. "25", "12-200"), it is appended to the
+ * link label as `${basename}:${range}`; the link target stays the abs path.
  */
-function formatFileLink(file: string): string | null {
+function formatFileLink(file: string, range?: string): string | null {
 	if (!file?.startsWith("/")) return null;
-	return `File: [${basename(file)}](${file})`;
+	const label = range ? `${basename(file)}:${range}` : basename(file);
+	return `File: [${label}](${file})`;
 }
 
 /**
@@ -125,15 +128,18 @@ function formatFileLink(file: string): string | null {
  * - "absent"  → no path supplied (or not absolute); render nothing
  * - "missing" → path supplied but file does not exist on disk; render a hint
  * - "link"    → path supplied and file exists; render a clickable markdown link
+ * When `range` is provided, the link label becomes `${basename}:${range}`
+ * (target unchanged). Hint branches and absent paths ignore `range`.
  */
 type FileMention =
 	| { kind: "link"; text: string }
 	| { kind: "missing" | "absent" };
 
-function resolveFileMention(file: string): FileMention {
+function resolveFileMention(file: string, range?: string): FileMention {
 	if (!file?.startsWith("/")) return { kind: "absent" };
 	if (!existsSync(file)) return { kind: "missing" };
-	return { kind: "link", text: `File: [${basename(file)}](${file})` };
+	const label = range ? `${basename(file)}:${range}` : basename(file);
+	return { kind: "link", text: `File: [${label}](${file})` };
 }
 
 /**
@@ -157,11 +163,14 @@ function handlePrompt(pi: ExtensionAPI, message: PromptMessage): void {
 		text = `[Hint: The source buffer is unsaved in Neovim (no file path). Do not search for the file — ask the user for the location or its contents.]\n\n${text}`;
 	} else if (state === "saved") {
 		// nvim confirms the file is on disk and unmodified — trust the signal
-		const link = formatFileLink(message.context.file);
+		const link = formatFileLink(message.context.file, message.context.range);
 		if (link) text = `${link}\n\n${text}`;
 	} else {
 		// No buffer_state from nvim (old sender) — use existsSync fallback
-		const mention = resolveFileMention(message.context.file);
+		const mention = resolveFileMention(
+			message.context.file,
+			message.context.range,
+		);
 		if (mention.kind === "link") {
 			text = `${mention.text}\n\n${text}`;
 		} else if (mention.kind === "missing") {
