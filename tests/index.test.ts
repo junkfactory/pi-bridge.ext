@@ -379,6 +379,7 @@ describe("extension socket lifecycle", () => {
 		expect(first.pi.sendUserMessage).not.toHaveBeenCalled();
 		expect(second.pi.sendUserMessage).toHaveBeenCalledWith(
 			expect.stringContaining("hello from nvim"),
+			{ deliverAs: "steer" },
 		);
 	});
 
@@ -425,6 +426,7 @@ describe("extension socket lifecycle", () => {
 		expect(first.pi.sendUserMessage).not.toHaveBeenCalled();
 		expect(second.pi.sendUserMessage).toHaveBeenCalledWith(
 			expect.stringContaining("hello from nvim"),
+			{ deliverAs: "steer" },
 		);
 	});
 
@@ -477,6 +479,7 @@ describe("extension socket lifecycle", () => {
 		expect(first.pi.sendUserMessage).not.toHaveBeenCalled();
 		expect(resumed.pi.sendUserMessage).toHaveBeenCalledWith(
 			expect.stringContaining("hello from nvim"),
+			{ deliverAs: "steer" },
 		);
 	});
 
@@ -541,6 +544,7 @@ describe("extension socket lifecycle", () => {
 		expect(afterNew.pi.sendUserMessage).not.toHaveBeenCalled();
 		expect(afterResume.pi.sendUserMessage).toHaveBeenCalledWith(
 			expect.stringContaining("hello from nvim"),
+			{ deliverAs: "steer" },
 		);
 	});
 
@@ -681,6 +685,55 @@ describe("extension socket lifecycle", () => {
 		);
 		expect(broadcast).toHaveBeenCalledWith(
 			expect.stringContaining('"code":"stale_context"'),
+		);
+	});
+
+	it("does not broadcast error when prompt is delivered with steer option", async () => {
+		let onMessage: ((raw: string) => void) | undefined;
+		vi.mocked(start).mockImplementation(async (_path, cb) => {
+			onMessage ??= cb;
+			return { status: "started" };
+		});
+
+		const { handlers, pi } = registerExtension();
+		pi.sendUserMessage.mockImplementation(
+			(_text: string, options?: { deliverAs: string }) => {
+				// Mimic pi's real contract: busy session without options throws
+				if (options === undefined) {
+					throw new Error(
+						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+					);
+				}
+			},
+		);
+
+		await handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, undefined, "test-session"),
+		);
+
+		const { broadcast } = await import("../src/socket.js");
+		vi.mocked(broadcast).mockClear();
+
+		onMessage?.(
+			JSON.stringify({
+				type: "prompt",
+				text: "hello",
+				context: {
+					file: new URL(import.meta.url).pathname,
+					cwd: "/tmp",
+					mode: "normal",
+					buffer_state: "saved",
+				},
+			}),
+		);
+
+		expect(broadcast).not.toHaveBeenCalledWith(
+			expect.stringContaining('"type":"error"'),
+		);
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			expect.stringContaining("hello"),
+			{ deliverAs: "steer" },
 		);
 	});
 });

@@ -111,6 +111,8 @@ String indicating the buffer's save state. When present, the handler uses it to 
 
 When `buffer_state` is absent (e.g. from an older nvim plugin), the handler falls back to checking whether the file exists on disk via `existsSync`.
 
+Prompts sent while the agent is mid-run are delivered with `deliverAs: "steer"`, so pi redirects the current run instead of erroring; when idle the message starts a normal turn.
+
 **pi → Neovim** (events):
 
 ```json

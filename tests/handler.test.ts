@@ -36,6 +36,7 @@ describe("handleMessage", () => {
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 		expect(pi.sendUserMessage).toHaveBeenCalledWith(
 			"File: [main.ts](/home/user/src/main.ts)\n\nfix this",
+			{ deliverAs: "steer" },
 		);
 	});
 
@@ -46,7 +47,9 @@ describe("handleMessage", () => {
 			makePrompt({ context: { file: "", cwd: "/c", mode: "normal" } }),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix this");
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix this", {
+			deliverAs: "steer",
+		});
 	});
 
 	it("sends only the text when file is relative", () => {
@@ -58,7 +61,9 @@ describe("handleMessage", () => {
 			}),
 		);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix this");
+		expect(pi.sendUserMessage).toHaveBeenCalledWith("fix this", {
+			deliverAs: "steer",
+		});
 	});
 
 	it("includes file link with filetype present", () => {
@@ -79,6 +84,7 @@ describe("handleMessage", () => {
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 		expect(pi.sendUserMessage).toHaveBeenCalledWith(
 			"File: [f.ts](/f.ts)\n\nhello",
+			{ deliverAs: "steer" },
 		);
 	});
 
@@ -99,6 +105,7 @@ describe("handleMessage", () => {
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 		expect(pi.sendUserMessage).toHaveBeenCalledWith(
 			"File: [utils.ts](/home/user/src/utils.ts)\n\nexplain",
+			{ deliverAs: "steer" },
 		);
 	});
 
@@ -194,6 +201,26 @@ describe("handleMessage", () => {
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
 		expect(pi.sendUserMessage).toHaveBeenCalledWith(
 			"File: [main.ts](/home/user/src/main.ts)\n\nfix this",
+			{ deliverAs: "steer" },
+		);
+	});
+
+	it("passes deliverAs steer so busy-session prompts queue instead of throwing", () => {
+		const pi = mockPi();
+		pi.sendUserMessage.mockImplementation(
+			(_text: string, options?: { deliverAs: string }) => {
+				// Mimic pi's real contract: busy session without options throws
+				if (options === undefined) {
+					throw new Error(
+						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+					);
+				}
+			},
+		);
+		expect(() => handleMessage(pi, makePrompt())).not.toThrow();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"File: [main.ts](/home/user/src/main.ts)\n\nfix this",
+			{ deliverAs: "steer" },
 		);
 	});
 

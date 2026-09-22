@@ -169,5 +169,5 @@ function handlePrompt(pi: ExtensionAPI, message: PromptMessage): void {
 		}
 	}
 
-	pi.sendUserMessage(text);
+	pi.sendUserMessage(text, { deliverAs: "steer" });
 }

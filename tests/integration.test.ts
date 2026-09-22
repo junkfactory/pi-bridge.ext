@@ -114,11 +114,13 @@ describe("integration: socket → protocol → handler → pi", () => {
 		// Verify pi received the raw text exactly
 		await waitFor(() => pi.sendUserMessage.mock.calls.length === 1);
 		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
-
 		const call = pi.sendUserMessage.mock.calls[0][0] as string;
 		expect(call).toBe(
 			"File: [main.ts](/home/user/src/main.ts)\n\nadd error handling",
 		);
+		expect(pi.sendUserMessage.mock.calls[0][1]).toEqual({
+			deliverAs: "steer",
+		});
 	});
 
 	it("delivers visual mode context", async () => {
@@ -148,6 +150,9 @@ describe("integration: socket → protocol → handler → pi", () => {
 		expect(call).toBe(
 			"File: [utils.ts](/home/user/src/utils.ts)\n\nexplain this",
 		);
+		expect(pi.sendUserMessage.mock.calls[0][1]).toEqual({
+			deliverAs: "steer",
+		});
 	});
 
 	it("drops invalid messages silently", async () => {
