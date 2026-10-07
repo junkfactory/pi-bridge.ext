@@ -61,10 +61,9 @@ const PROMPT_LINE = "approve: y / a(ll this file) / n  (Esc: cancel)";
 
 /**
  * Minimal Component that renders a single bordered line and maps a small
- * set of keys to decisions. Local to this module — pi-tui is a transitive
- * dependency of pi-coding-agent and isn't resolvable from this extension's
- * root node_modules, so we keep the type as a structural shape that
- * matches pi-tui's Component without importing it.
+ * set of keys to decisions. Local to this module — pi-tui is deliberately
+ * not imported here — the type stays a structural shape matching
+ * pi-tui's Component.
  */
 interface ComponentLike {
 	render(width: number): string[];
@@ -84,7 +83,8 @@ class ApprovalPromptComponent implements ComponentLike {
 	render(width: number): string[] {
 		const inner = PROMPT_LINE;
 		const styled = this.theme.fg("accent", inner);
-		// pi-tui's BorderedLoader is unavailable here — render a hand-rolled
+		// BorderedLoader is re-exported from the pi-coding-agent root, but it is
+		// an animated loader — this static single-line prompt renders a hand-rolled
 		// single-line box. Width 0 / negative means "use as much as you have";
 		// we clamp the inner line so we don't draw past the right edge.
 		const pad = Math.max(0, width - inner.length - 4);

@@ -1058,6 +1058,28 @@ describe("extension — edit-approval origin gate", () => {
 			restore();
 		}
 	});
+
+	it("resets the gate on session_before_tree", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			const { handlers } = registerExtension();
+			await handlers.session_before_tree({});
+			expect(gate.reset).toHaveBeenCalled();
+		} finally {
+			restore();
+		}
+	});
+
+	it("resets the gate on session_tree", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			const { handlers } = registerExtension();
+			await handlers.session_tree({});
+			expect(gate.reset).toHaveBeenCalled();
+		} finally {
+			restore();
+		}
+	});
 });
 
 describe("extension — origin flag lifecycle", () => {
@@ -1185,18 +1207,16 @@ describe("extension — approval_resolved broadcast", () => {
 describe("extension — edit-tool system-prompt guard", () => {
 	it("appends the file-editing guard to every turn's system prompt", async () => {
 		const { handlers } = registerExtension();
+		const sections: Record<string, string> = {};
 		const event = {
 			type: "before_agent_start",
 			prompt: "do a thing",
 			systemPrompt: "BASE PROMPT",
+			systemPromptOptions: { sections },
 		};
 		const result = await handlers.before_agent_start(event, mockCtx());
-		expect(result).toEqual({
-			systemPrompt: expect.stringMatching(/^BASE PROMPT\n\n/),
-		});
-		expect((result as { systemPrompt: string }).systemPrompt).toContain(
-			"edit` and `write` tools",
-		);
+		expect(result).toBeUndefined();
+		expect(sections.edit_tool_guard).toContain("edit` and `write` tools");
 	});
 
 	it("injects nothing when the approval gate is disabled", async () => {
@@ -1204,11 +1224,18 @@ describe("extension — edit-tool system-prompt guard", () => {
 		process.env.PI_BRIDGE_EDIT_APPROVAL = "0";
 		try {
 			const { handlers } = registerExtension();
+			const sections: Record<string, string> = {};
 			const result = await handlers.before_agent_start(
-				{ type: "before_agent_start", prompt: "x", systemPrompt: "BASE" },
+				{
+					type: "before_agent_start",
+					prompt: "x",
+					systemPrompt: "BASE",
+					systemPromptOptions: { sections },
+				},
 				mockCtx(),
 			);
 			expect(result).toBeUndefined();
+			expect(sections.edit_tool_guard).toBeUndefined();
 		} finally {
 			process.env.PI_BRIDGE_EDIT_APPROVAL = prev;
 		}

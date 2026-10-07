@@ -29,7 +29,6 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type {
 	AgentEndEvent,
-	BeforeAgentStartEventResult,
 	EditToolCallEvent,
 	ExtensionAPI,
 	ExtensionContext,
@@ -410,18 +409,20 @@ export default function (pi: ExtensionAPI) {
 	// The gate only sees edit/write; agents can still mutate files via
 	// bash (sed -i, redirects, ...). Policing shell commands is
 	// whack-a-mole, so instead every turn's system prompt carries a
-	// standing instruction to use the gated tools (see EDIT_TOOL_GUARD).
+	// standing instruction to use the gated tools (see EDIT_TOOL_GUARD),
+	// injected as a structured system-prompt section rather than by
+	// replacing the whole prompt.
 	// -----------------------------------------------------------------
-	pi.on(
-		"before_agent_start",
-		(event): BeforeAgentStartEventResult | undefined => {
-			// Same kill-switch as the gate itself.
-			if (process.env.PI_BRIDGE_EDIT_APPROVAL === "0") return undefined;
-			return {
-				systemPrompt: `${event.systemPrompt}\n\n${EDIT_TOOL_GUARD}`,
-			};
-		},
-	);
+	pi.on("before_agent_start", (event) => {
+		// Same kill-switch as the gate itself.
+		if (process.env.PI_BRIDGE_EDIT_APPROVAL === "0") {
+			delete event.systemPromptOptions.sections.edit_tool_guard;
+			return;
+		}
+		// Structured section (>= 0.86.0): pi records a transcript delta and
+		// preserves cached prefixes instead of replacing the whole prompt.
+		event.systemPromptOptions.sections.edit_tool_guard = EDIT_TOOL_GUARD;
+	});
 
 	pi.on(
 		"tool_call",
@@ -563,6 +564,17 @@ export default function (pi: ExtensionAPI) {
 	// existing session lifecycle handlers — don't replace them.
 	// -----------------------------------------------------------------
 	pi.on("session_before_switch", () => {
+		resetGate();
+	});
+	// Tree navigation (branch switch) invalidates contexts without firing
+	// session_before_switch, so clear gate/mirror state there too. Both
+	// sides of the navigation: before covers the transition (a cancelled
+	// navigation only costs one extra re-prompt), after covers the
+	// completed switch — resetGate() is idempotent.
+	pi.on("session_before_tree", () => {
+		resetGate();
+	});
+	pi.on("session_tree", () => {
 		resetGate();
 	});
 	// No reset on session_shutdown: session switches tear down via

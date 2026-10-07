@@ -15,14 +15,14 @@ This extension opens a Unix socket on session start, listens for incoming messag
 
 ## Install
 
-Requires [pi](https://github.com/earendil-works/pi-coding-agent) v0.84+.
+Requires [pi](https://github.com/earendil-works/pi-coding-agent) v1.0.4+.
 
 ### Production
 
 Pin to a release (recommended):
 
 ```bash
-pi install git:github.com/junkfactory/pi-bridge.ext@v0.1.0
+pi install git:github.com/junkfactory/pi-bridge.ext@v1.3.0
 ```
 
 Update to a new version with:
@@ -357,7 +357,7 @@ Releases are triggered by tagging. The `tag.sh` script handles validation, build
 ./.github/ci/tag.sh 0.1.2   # no 'v' prefix — script adds it
 ```
 
-This runs `npm ci`, Biome lint, and the Vitest suite, creates a `v0.1.2` jj tag on main, and pushes. The push triggers a CI job that creates the GitHub release with auto-generated notes.
+This runs `npm ci`, Biome lint, and the Vitest suite, creates a `v0.1.2` tag on main, and pushes. The push triggers a CI job that creates the GitHub release with auto-generated notes.
 
 ### Cross-repo pairing
 
