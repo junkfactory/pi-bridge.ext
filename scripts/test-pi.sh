@@ -37,7 +37,7 @@ export PI_BRIDGE_LOG_FILE="${PI_BRIDGE_LOG_FILE:-/tmp/diff-fix-test/pi-bridge.lo
 mkdir -p "$(dirname "${PI_BRIDGE_LOG_FILE}")"
 
 # Build extension args: always include local pi-bridge.ext
-EXT_ARGS=(-e "$EXT_DIR/src/index.ts")
+EXT_ARGS=(-e "$EXT_DIR/extensions/index.ts")
 
 # Split args at "--": before it = extensions, after it = passthrough pi args
 EXT_INPUT=()
