@@ -307,6 +307,17 @@ export function broadcast(data: string): void {
 	}
 }
 
+/**
+ * True while at least one client is attached. Counts every accepted
+ * connection, so it answers "is anything attached", not "is nvim
+ * attached" — probe and health-check connections count too. False before
+ * the first connect, after the last disconnect, and when another pi
+ * process owns the socket (foreign-owner).
+ */
+export function isConnected(): boolean {
+	return state.connections.size > 0;
+}
+
 // ---------------------------------------------------------------------------
 // Internal
 // ---------------------------------------------------------------------------

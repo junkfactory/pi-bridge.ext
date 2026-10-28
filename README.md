@@ -171,7 +171,7 @@ Per-file "all" memory is remembered for the duration of the session; a fresh ses
 
 Disabling the gate: set `PI_BRIDGE_EDIT_APPROVAL=0` before launching pi. The extension then allows every `edit` / `write` call without prompting (the original behavior).
 
-Bash bypass: the gate only sees `edit` / `write` tool calls — shell mutations (`sed -i`, redirections, …) are invisible to it. To steer the agent toward the gated tools, the extension appends a standing file-editing instruction to every turn's system prompt (`EDIT_TOOL_GUARD` in `src/index.ts`) while the gate is enabled; disabling the gate removes the instruction too.
+Bash bypass: the gate only sees `edit` / `write` tool calls — shell mutations (`sed -i`, redirections, …) are invisible to it. The extension therefore appends a standing instruction to the system prompt (`EDIT_TOOL_GUARD` in `src/index.ts`) asking that intentional content edits go through `edit` / `write` so the user can review the diff, and that shell commands must not bypass them. Normal commands may still create runtime artifacts (test output, logs, caches), and deletions and renames stay subject to the separate safety and approval rules. The section is injected only while the gate is enabled **and** at least one client is connected to the extension socket — any accepted connection counts, so the check means "something is attached", not "nvim is attached". It is dropped on the next turn after the bridge disconnects and returns on the first turn after a client reconnects.
 
 Headless / RPC modes: when `ctx.hasUI === false` (e.g. `pi -p` or JSON output), the extension auto-approves without opening a prompt — non-interactive workflows aren’t blocked. In RPC mode `ctx.ui.custom` returns undefined; the gate treats this as cancelled (block) to preserve the fail-safe semantics.
 
@@ -323,7 +323,7 @@ Levels: `trace`, `debug`, `info`, `warn`, `error`.
 ### Kill Switches
 
 - `PI_BRIDGE_LOG_LEVEL` — minimum log level (above)
-- `PI_BRIDGE_EDIT_APPROVAL=0` — disable the edit-approval gate entirely (every `edit`/`write` is allowed without prompting). The runtime kill-switch avoids a rebuild when the gate is in the way; flip back to `1` (or unset) to re-enable.
+- `PI_BRIDGE_EDIT_APPROVAL=0` — disable the edit-approval gate entirely (every `edit`/`write` is allowed without prompting). The runtime kill-switch avoids a rebuild when the gate is in the way; flip back to `1` (or unset) to re-enable. Disabling the gate also removes the `edit_tool_guard` system-prompt section.
 - `PI_BRIDGE_UI_PROMPT_MIRROR=0` — disable the UI prompt mirror entirely; the extension never installs wrappers on `ctx.ui` and every extension's prompts go straight to pi's TUI. The runtime kill-switch avoids a rebuild when the mirror is in the way; flip back to `1` (or unset) to re-enable.
 - `PI_BRIDGE_LOG_FILE` — override the log destination (tests use this)
 

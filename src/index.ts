@@ -13,16 +13,18 @@
  */
 
 /**
- * Standing system-prompt instruction steering the agent away from shell
- * file mutations (which the approval gate cannot see) toward the gated
- * edit/write tools. Appended to every turn's system prompt by the
- * `before_agent_start` handler while the gate is enabled.
+ * Standing system-prompt instruction asking the agent to route intentional
+ * file edits through the gated `edit` / `write` tools rather than shell
+ * commands. Deliberately narrow: runtime artifacts, deletions and renames
+ * are not fenced by it. Appended by the `before_agent_start` handler while
+ * the gate is enabled and an nvim client is connected.
  */
 export const EDIT_TOOL_GUARD = [
-	"File-editing policy: apply all file changes with the `edit` and `write` tools.",
-	"Never modify files through bash — no `sed -i`, `perl -i`, `tee`, output redirection",
-	"(> / >>), `mv`/`cp` overwrites, heredocs into files, or scripts that write files.",
-	"edit/write calls show a diff preview for user approval; shell mutations bypass it.",
+	"File-editing policy:",
+	"Use `edit` / `write` for intentional file edits so the user can review diffs;",
+	"do not bypass them with shell commands or scripts.",
+	"Normal commands may create runtime artifacts, such as test outputs, logs and caches.",
+	"Deletions and renames remain subject to separate safety and approval rules.",
 ].join("\n");
 
 import { randomUUID } from "node:crypto";
@@ -45,7 +47,13 @@ import { ensureSocketDir, socketPath } from "./path.js";
 import { getMirror, installMirror, setMirrorReady } from "./prompt_mirror.js";
 import type { ErrorCode, OutboundEvent } from "./protocol.js";
 import { parseMessage, serializeEvent } from "./protocol.js";
-import { broadcast, setOnDisconnect, start, stop } from "./socket.js";
+import {
+	broadcast,
+	isConnected,
+	setOnDisconnect,
+	start,
+	stop,
+} from "./socket.js";
 import { getNvimTurnActive, setNvimTurnActive } from "./turn.js";
 import { type PromptDecision, promptSelection } from "./ui.js";
 
@@ -407,15 +415,17 @@ export default function (pi: ExtensionAPI) {
 	// not resolve the request — the pi prompt stays open.
 	//
 	// The gate only sees edit/write; agents can still mutate files via
-	// bash (sed -i, redirects, ...). Policing shell commands is
-	// whack-a-mole, so instead every turn's system prompt carries a
-	// standing instruction to use the gated tools (see EDIT_TOOL_GUARD),
-	// injected as a structured system-prompt section rather than by
-	// replacing the whole prompt.
+	// bash. The guard narrows only intentional content edits (see
+	// EDIT_TOOL_GUARD) and rides in as a structured system-prompt
+	// section rather than by replacing the whole prompt. It ships only
+	// while a client is attached: with no nvim bridge there is no gated
+	// turn to protect, and the section is dropped on the next turn after
+	// the bridge disconnects.
 	// -----------------------------------------------------------------
 	pi.on("before_agent_start", (event) => {
-		// Same kill-switch as the gate itself.
-		if (process.env.PI_BRIDGE_EDIT_APPROVAL === "0") {
+		// Same kill-switch as the gate itself, plus: no nvim client
+		// connected means no gated edit/write path to steer toward.
+		if (process.env.PI_BRIDGE_EDIT_APPROVAL === "0" || !isConnected()) {
 			delete event.systemPromptOptions.sections.edit_tool_guard;
 			return;
 		}

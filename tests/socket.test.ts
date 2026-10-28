@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { info } from "../src/log.js";
-import { broadcast, start, stop } from "../src/socket.js";
+import { broadcast, isConnected, start, stop } from "../src/socket.js";
 
 vi.mock("../src/log.js", () => ({
 	LOG_PATH: "/tmp/pi-bridge-test.log",
@@ -279,6 +279,35 @@ describe("broadcast", () => {
 	it("is a noop with no connections", () => {
 		// Should not throw when there are no connections
 		expect(() => broadcast('{"type":"test"}\n')).not.toThrow();
+	});
+});
+
+describe("isConnected", () => {
+	it("is false before any client connects", async () => {
+		await start(sockPath, () => {});
+
+		expect(isConnected()).toBe(false);
+	});
+
+	it("is true once a client connects", async () => {
+		await start(sockPath, () => {});
+
+		const client = await connect();
+		await waitFor(() => isConnected());
+		expect(isConnected()).toBe(true);
+
+		client.destroy();
+	});
+
+	it("is false after the last client disconnects", async () => {
+		await start(sockPath, () => {});
+
+		const client = await connect();
+		await waitFor(() => isConnected());
+
+		client.destroy();
+		await waitFor(() => !isConnected());
+		expect(isConnected()).toBe(false);
 	});
 });
 

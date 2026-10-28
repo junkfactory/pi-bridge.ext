@@ -11,13 +11,14 @@ import {
 	isMirrorReady,
 	setMirrorReady,
 } from "../src/prompt_mirror.js";
-import { setOnDisconnect, start, stop } from "../src/socket.js";
+import { isConnected, setOnDisconnect, start, stop } from "../src/socket.js";
 
 vi.mock("../src/socket.js", () => ({
 	start: vi.fn(),
 	stop: vi.fn(),
 	broadcast: vi.fn(),
 	setOnDisconnect: vi.fn(),
+	isConnected: vi.fn(() => true),
 }));
 
 vi.mock("../src/log.js", () => ({
@@ -135,6 +136,8 @@ beforeEach(() => {
 	vi.mocked(start).mockReset().mockResolvedValue({ status: "started" });
 	vi.mocked(stop).mockReset().mockResolvedValue(undefined);
 	vi.mocked(setOnDisconnect).mockReset();
+	vi.mocked(isConnected).mockReset();
+	vi.mocked(isConnected).mockReturnValue(true);
 	vi.mocked(installMirror).mockReset();
 	vi.mocked(getMirror).mockReset();
 	vi.mocked(getMirror).mockReturnValue({
@@ -1205,18 +1208,48 @@ describe("extension — approval_resolved broadcast", () => {
 // ---------------------------------------------------------------------------
 
 describe("extension — edit-tool system-prompt guard", () => {
-	it("appends the file-editing guard to every turn's system prompt", async () => {
+	it("injects the edit guard while an nvim client is connected", async () => {
 		const { handlers } = registerExtension();
 		const sections: Record<string, string> = {};
-		const event = {
-			type: "before_agent_start",
-			prompt: "do a thing",
-			systemPrompt: "BASE PROMPT",
-			systemPromptOptions: { sections },
-		};
-		const result = await handlers.before_agent_start(event, mockCtx());
+		const result = await handlers.before_agent_start(
+			{
+				type: "before_agent_start",
+				prompt: "do a thing",
+				systemPrompt: "BASE PROMPT",
+				systemPromptOptions: { sections },
+			},
+			mockCtx(),
+		);
 		expect(result).toBeUndefined();
-		expect(sections.edit_tool_guard).toContain("edit` and `write` tools");
+		expect(sections.edit_tool_guard).toContain(
+			"Use `edit` / `write` for intentional file edits",
+		);
+		expect(sections.edit_tool_guard).not.toContain(
+			"Never modify files through bash",
+		);
+		// The carveouts must survive future wording edits: runtime
+		// artifacts stay allowed, deletions and renames stay out of scope.
+		expect(sections.edit_tool_guard).toContain("runtime artifacts");
+		expect(sections.edit_tool_guard).toContain(
+			"Deletions and renames remain subject to separate safety and approval rules",
+		);
+	});
+
+	it("injects nothing while no nvim client is connected", async () => {
+		vi.mocked(isConnected).mockReturnValue(false);
+		const { handlers } = registerExtension();
+		const sections: Record<string, string> = {};
+		const result = await handlers.before_agent_start(
+			{
+				type: "before_agent_start",
+				prompt: "do a thing",
+				systemPrompt: "BASE PROMPT",
+				systemPromptOptions: { sections },
+			},
+			mockCtx(),
+		);
+		expect(result).toBeUndefined();
+		expect(sections.edit_tool_guard).toBeUndefined();
 	});
 
 	it("injects nothing when the approval gate is disabled", async () => {
