@@ -171,15 +171,23 @@ function promptWithHandle<T>(
 	uiHost[GATE_PROMPT_KEY] = true;
 	let uiPromise: Promise<T | undefined>;
 	try {
-		uiPromise = ctx.ui.custom<T>((tui, theme, _keybindings, rawDone) => {
-			uiDone = rawDone;
-			const done = (d: T) => {
-				if (uiSettled) return;
-				uiSettled = true;
-				rawDone(d);
-			};
-			return build(tui, theme, done);
-		});
+		uiPromise = ctx.ui.custom<T>(
+			(tui, theme, _keybindings, rawDone) => {
+				uiDone = rawDone;
+				const done = (d: T) => {
+					if (uiSettled) return;
+					uiSettled = true;
+					rawDone(d);
+				};
+				return build(tui, theme, done);
+			},
+			{
+				blocked: {
+					kind: "question",
+					message: "Waiting for an answer in Neovim",
+				},
+			},
+		);
 	} finally {
 		uiHost[GATE_PROMPT_KEY] = false;
 	}

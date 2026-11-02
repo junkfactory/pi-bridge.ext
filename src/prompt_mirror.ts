@@ -119,6 +119,12 @@ interface CustomPending {
 
 type PendingEntry = StructuredPending | CustomPending;
 
+/** Options for pi's `ui.custom`, forwarded untouched by the mirror. */
+type CustomOptions = {
+	overlay?: boolean;
+	blocked?: { kind: "permission" | "question" | "auth"; message: string };
+};
+
 /** Inbound payload after protocol validation; one of the three forms. */
 export type ResponsePayload =
 	| { kind: "value"; value: string }
@@ -210,9 +216,9 @@ export interface Mirror {
 				keybindings: unknown,
 				done: (result: T) => void,
 			) => ComponentLike | Promise<ComponentLike>,
-			options?: { overlay?: boolean },
+			options?: CustomOptions,
 		) => Promise<T>,
-		options?: { overlay?: boolean },
+		options?: CustomOptions,
 	): Promise<T>;
 	/** Route a parsed `ui_prompt_response` to its pending entry. */
 	handleResponse(id: string, payload: ResponsePayload): void;
@@ -420,9 +426,9 @@ export function createMirror(opts: CreateMirrorOptions): Mirror {
 				keybindings: unknown,
 				done: (result: T) => void,
 			) => ComponentLike | Promise<ComponentLike>,
-			options?: { overlay?: boolean },
+			options?: CustomOptions,
 		) => Promise<T>,
-		options?: { overlay?: boolean },
+		options?: CustomOptions,
 	): Promise<T> => {
 		// Same active() gate as runSelect/runConfirm: env kill switch,
 		// mirror-ready, and nvim-originated turn. Without this, custom
@@ -693,7 +699,7 @@ export function installMirror(ctx: ExtensionContext): Mirror | null {
 			keybindings: unknown,
 			done: (result: unknown) => void,
 		) => unknown,
-		options?: { overlay?: boolean },
+		options?: CustomOptions,
 	) => Promise<unknown>;
 
 	ctx.ui.select = ((
@@ -729,7 +735,7 @@ export function installMirror(ctx: ExtensionContext): Mirror | null {
 			keybindings: unknown,
 			done: (result: unknown) => void,
 		) => unknown,
-		options?: { overlay?: boolean },
+		options?: CustomOptions,
 	) =>
 		mirror.runCustom(
 			ctx,

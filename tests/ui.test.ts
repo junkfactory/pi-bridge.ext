@@ -105,6 +105,12 @@ describe("promptSelection — component lifecycle", () => {
 		if (options !== undefined) {
 			expect((options as { overlay?: boolean }).overlay).not.toBe(true);
 		}
+		// Inline gate prompt: pi reports the session as blocked on an answer.
+		const blocked = (
+			options as { blocked?: { kind?: string; message?: string } }
+		).blocked;
+		expect(blocked?.kind).toBe("question");
+		expect(blocked?.message).toBe("Waiting for an answer in Neovim");
 		expect(captured.component).toBeDefined();
 		expect(typeof captured.component.render).toBe("function");
 		expect(typeof captured.component.invalidate).toBe("function");
@@ -276,6 +282,11 @@ describe("promptOptions — component lifecycle", () => {
 		if (options !== undefined) {
 			expect((options as { overlay?: boolean }).overlay).not.toBe(true);
 		}
+		const blocked = (
+			options as { blocked?: { kind?: string; message?: string } }
+		).blocked;
+		expect(blocked?.kind).toBe("question");
+		expect(blocked?.message).toBe("Waiting for an answer in Neovim");
 		expect(captured.component).toBeDefined();
 		expect(typeof captured.component.render).toBe("function");
 		expect(typeof captured.component.invalidate).toBe("function");
