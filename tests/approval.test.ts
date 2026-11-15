@@ -373,6 +373,387 @@ describe("createGate — session reset", () => {
 	});
 });
 
+describe("createGate — decisions for queued requests", () => {
+	it("records 'all' for a queued request and resolves it without broadcasting", async () => {
+		const broadcast = vi.fn();
+		const gate = createGate({ broadcast });
+
+		const p1 = gate.requestApproval(args({ path: "/tmp/head.ts" }));
+		const p2 = gate.requestApproval(
+			args({ path: "/tmp/queued.ts", id: "queued-id" }),
+		);
+		await waitForCall(broadcast);
+		// Only the head is broadcast; the queued request waits behind it.
+		expect(broadcast).toHaveBeenCalledTimes(1);
+
+		// The pi prompt answers the queued request while the head is still
+		// up — a decision that used to be dropped outright.
+		gate.handleResponse("queued-id", "all");
+
+		// Settling the head lets the queued request run; it resolves with
+		// the stored decision and broadcasts nothing.
+		gate.handleResponse(extractId(broadcast), "yes");
+		expect((await p1).result).toBe("yes");
+		const r2 = await p2;
+		expect(r2.id).toBe("queued-id");
+		expect(r2.result).toBe("all");
+		expect(broadcast).toHaveBeenCalledTimes(1);
+
+		// The "all" side-effect was recorded: the next request for that
+		// path is auto-approved without a prompt.
+		const before = broadcast.mock.calls.length;
+		expect(await requestResult(gate, args({ path: "/tmp/queued.ts" }))).toBe(
+			"all",
+		);
+		expect(broadcast.mock.calls.length).toBe(before);
+	});
+
+	it("does not fire onResolved for a queued request decided before it ran", async () => {
+		const broadcast = vi.fn();
+		const observed: string[] = [];
+		const gate = createGate({
+			broadcast,
+			onResolved: (id) => observed.push(id),
+		});
+
+		const p1 = gate.requestApproval(args({ path: "/tmp/head2.ts" }));
+		const p2 = gate.requestApproval(
+			args({ path: "/tmp/queued2.ts", id: "q2" }),
+		);
+		await waitForCall(broadcast);
+		const headId = extractId(broadcast);
+
+		gate.handleResponse("q2", "no");
+		gate.handleResponse(headId, "yes");
+		await p1;
+
+		expect((await p2).result).toBe("no");
+		// Neovim never saw q2, so no approval_resolved is sent for it.
+		expect(observed).toEqual([headId]);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels a queued request without broadcasting when its prompt is dismissed", async () => {
+		const broadcast = vi.fn();
+		const gate = createGate({ broadcast });
+
+		const p1 = gate.requestApproval(args({ path: "/tmp/head3.ts" }));
+		const p2 = gate.requestApproval(
+			args({ path: "/tmp/queued3.ts", id: "q3" }),
+		);
+		await waitForCall(broadcast);
+
+		gate.handleCancel("q3");
+		gate.handleResponse(extractId(broadcast), "yes");
+		await p1;
+
+		expect((await p2).result).toBe("cancelled");
+		expect(broadcast).toHaveBeenCalledTimes(1);
+
+		// Cancelling never records per-file memory.
+		const before = broadcast.mock.calls.length;
+		const p3 = gate.requestApproval(args({ path: "/tmp/queued3.ts" }));
+		await waitForCount(broadcast, before + 1);
+		gate.handleResponse(extractId(broadcast), "no");
+		expect((await p3).result).toBe("no");
+	});
+});
+
+describe("createGate — late decisions from the losing surface", () => {
+	it("records 'all' memory when the losing surface answers 'all' after 'yes' settled", async () => {
+		const broadcast = vi.fn();
+		const log = vi.fn();
+		const observed: string[] = [];
+		const gate = createGate({
+			broadcast,
+			log,
+			onResolved: (id) => observed.push(id),
+		});
+
+		const p = gate.requestApproval(args({ path: "/tmp/race.ts" }));
+		await waitForCall(broadcast);
+		const id = extractId(broadcast);
+
+		// One surface says "yes": settled, nothing remembered yet.
+		gate.handleResponse(id, "yes");
+		expect((await p).result).toBe("yes");
+		expect(observed).toEqual([id]);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+
+		// The other surface (the pi prompt) answers "all" only after
+		// settlement: memory is still recorded...
+		gate.handleResponse(id, "all");
+		expect(log).toHaveBeenCalledTimes(1);
+		expect(log.mock.calls[0][0]).toContain(id);
+
+		// ...and nothing is re-settled or re-broadcast for the settled id.
+		expect(observed).toEqual([id]);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+		expect(
+			broadcast.mock.calls.some(([d]) =>
+				(d as string).includes("approval_resolved"),
+			),
+		).toBe(false);
+
+		// The file is now remembered: no fresh prompt for the same path.
+		expect(await requestResult(gate, args({ path: "/tmp/race.ts" }))).toBe(
+			"all",
+		);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the 'all' memory recorded once when both surfaces answer 'all'", async () => {
+		const broadcast = vi.fn();
+		const log = vi.fn();
+		const observed: string[] = [];
+		const gate = createGate({
+			broadcast,
+			log,
+			onResolved: (id) => observed.push(id),
+		});
+
+		const p = gate.requestApproval(args({ path: "/tmp/race2.ts" }));
+		await waitForCall(broadcast);
+		const id = extractId(broadcast);
+
+		// Winner says "all": remembered and settled.
+		gate.handleResponse(id, "all");
+		expect((await p).result).toBe("all");
+
+		// The losing surface answers "all" too — recorded once (a set, so
+		// it stays a single membership) and still no extra settlement.
+		gate.handleResponse(id, "all");
+		expect(log).toHaveBeenCalledTimes(1);
+		expect(observed).toEqual([id]);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+
+		// Two more requests for the path both short-circuit with no prompt:
+		// the memory is present exactly once, not duplicated per answer.
+		expect(await requestResult(gate, args({ path: "/tmp/race2.ts" }))).toBe(
+			"all",
+		);
+		expect(await requestResult(gate, args({ path: "/tmp/race2.ts" }))).toBe(
+			"all",
+		);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not resurrect a settled request from a late losing-surface answer", async () => {
+		const broadcast = vi.fn();
+		const gate = createGate({ broadcast });
+
+		const p = gate.requestApproval(args({ path: "/tmp/race3.ts" }));
+		await waitForCall(broadcast);
+		const id = extractId(broadcast);
+		gate.handleResponse(id, "yes");
+		expect((await p).result).toBe("yes");
+
+		// Late answer with another decision: no second settlement, no
+		// second approval_resolved.
+		const observed: string[] = [];
+		const gate2 = createGate({
+			broadcast,
+			onResolved: (w) => observed.push(w),
+		});
+		const p2 = gate2.requestApproval(args({ path: "/tmp/race4.ts" }));
+		await waitForCount(broadcast, 2);
+		const id2 = extractId(broadcast);
+		gate2.handleResponse(id2, "yes");
+		expect((await p2).result).toBe("yes");
+		gate2.handleResponse(id2, "all");
+		expect(observed).toEqual([id2]);
+	});
+
+	it("drops a late answer for a request that short-circuited at dequeue", async () => {
+		const broadcast = vi.fn();
+		const log = vi.fn();
+		const gate = createGate({ broadcast, log });
+
+		const p1 = gate.requestApproval(args({ path: "/tmp/short-head.ts" }));
+		const p2 = gate.requestApproval(
+			args({ path: "/tmp/short-q.ts", id: "short-q" }),
+		);
+		await waitForCall(broadcast);
+		const headId = extractId(broadcast);
+
+		// Decide the queued request, then let it dequeue: `runOne` applies
+		// the stored "yes" without broadcasting and drops the entry.
+		gate.handleResponse("short-q", "yes");
+		gate.handleResponse(headId, "yes");
+		expect((await p1).result).toBe("yes");
+		expect((await p2).result).toBe("yes");
+		expect(log).not.toHaveBeenCalled();
+
+		// A still-later "all" finds no entry: dropped with a log, and it
+		// must not record memory for a request nvim never saw.
+		gate.handleResponse("short-q", "all");
+		expect(log).toHaveBeenCalledTimes(1);
+		expect(log.mock.calls[0][0]).toContain("short-q");
+
+		const before = broadcast.mock.calls.length;
+		const p3 = gate.requestApproval(args({ path: "/tmp/short-q.ts" }));
+		await waitForCount(broadcast, before + 1);
+		gate.handleResponse(extractId(broadcast), "no");
+		expect((await p3).result).toBe("no");
+	});
+
+	it("never records 'all' memory for a cancelled request answered late", async () => {
+		const broadcast = vi.fn();
+		const log = vi.fn();
+		const observed: string[] = [];
+		const gate = createGate({
+			broadcast,
+			log,
+			onResolved: (id) => observed.push(id),
+		});
+
+		const p = gate.requestApproval(args({ path: "/tmp/race-cancel.ts" }));
+		await waitForCall(broadcast);
+		const id = extractId(broadcast);
+
+		// Esc from one surface settles the request as cancelled.
+		gate.handleCancel(id);
+		expect((await p).result).toBe("cancelled");
+		expect(observed).toEqual([id]);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+
+		// The other surface answers "all" only afterwards: logged, but no
+		// memory, no settlement, no extra broadcast.
+		gate.handleResponse(id, "all");
+		expect(log).toHaveBeenCalledTimes(1);
+		expect(log.mock.calls[0][0]).toContain(id);
+		expect(observed).toEqual([id]);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+
+		// The path was not approved: the next request prompts again.
+		const before = broadcast.mock.calls.length;
+		const p2 = gate.requestApproval(args({ path: "/tmp/race-cancel.ts" }));
+		await waitForCount(broadcast, before + 1);
+		gate.handleResponse(extractId(broadcast), "no");
+		expect((await p2).result).toBe("no");
+	});
+
+	it("logs only (no state change) for a late cancel on a settled request", async () => {
+		const broadcast = vi.fn();
+		const log = vi.fn();
+		const gate = createGate({ broadcast, log });
+
+		const p = gate.requestApproval(args({ path: "/tmp/race5.ts" }));
+		await waitForCall(broadcast);
+		const id = extractId(broadcast);
+		gate.handleResponse(id, "all");
+		expect((await p).result).toBe("all");
+
+		// A late Esc from the losing prompt must not un-remember the path.
+		gate.handleCancel(id);
+		expect(log).toHaveBeenCalledTimes(1);
+		expect(log.mock.calls[0][0]).toContain(id);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+
+		expect(await requestResult(gate, args({ path: "/tmp/race5.ts" }))).toBe(
+			"all",
+		);
+		expect(broadcast).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("createGate — dropped decisions are logged", () => {
+	it("logs and drops a response for an unknown id", () => {
+		const log = vi.fn();
+		const gate = createGate({ broadcast: vi.fn(), log });
+
+		expect(() => gate.handleResponse("no-such-id", "all")).not.toThrow();
+		expect(log).toHaveBeenCalledTimes(1);
+		expect(log.mock.calls[0][0]).toContain("no-such-id");
+	});
+
+	it("logs and drops a cancel for an unknown id", () => {
+		const log = vi.fn();
+		const gate = createGate({ broadcast: vi.fn(), log });
+
+		expect(() => gate.handleCancel("no-such-id")).not.toThrow();
+		expect(log).toHaveBeenCalledTimes(1);
+		expect(log.mock.calls[0][0]).toContain("no-such-id");
+	});
+
+	it("is silent by default (no log option supplied)", () => {
+		const gate = createGate({ broadcast: vi.fn() });
+
+		expect(() => gate.handleResponse("nope", "yes")).not.toThrow();
+		expect(() => gate.handleCancel("nope")).not.toThrow();
+	});
+
+	it("drops a decision for an already-settled request and logs it", async () => {
+		const broadcast = vi.fn();
+		const log = vi.fn();
+		const gate = createGate({ broadcast, log });
+
+		const p = gate.requestApproval(args());
+		await waitForCall(broadcast);
+		const id = extractId(broadcast);
+		gate.handleResponse(id, "yes");
+		expect((await p).result).toBe("yes");
+
+		// Nothing was dropped while the request was live.
+		expect(log).not.toHaveBeenCalled();
+		gate.handleResponse(id, "all");
+		expect(log).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("createGate — reset clears registered requests", () => {
+	it("forgets a decision recorded for a still-queued request", async () => {
+		const broadcast = vi.fn();
+		const gate = createGate({ broadcast });
+
+		const p1 = gate.requestApproval(args({ path: "/tmp/rs-head.ts" }));
+		const p2 = gate.requestApproval(
+			args({ path: "/tmp/rs-queued.ts", id: "rs-q" }),
+		);
+		await waitForCall(broadcast);
+
+		// Decide the queued request, then switch sessions before it runs.
+		gate.handleResponse("rs-q", "all");
+		gate.reset();
+
+		const [r1, r2] = await Promise.all([p1, p2]);
+		expect(r1.result).toBe("cancelled");
+		expect(r2.result).toBe("cancelled");
+		expect(r2.id).toBe("");
+		expect(broadcast).toHaveBeenCalledTimes(1);
+
+		// The queued decision and its "all" memory went with the reset: the
+		// path prompts again in the new session.
+		const before = broadcast.mock.calls.length;
+		const p3 = gate.requestApproval(args({ path: "/tmp/rs-queued.ts" }));
+		await waitForCount(broadcast, before + 1);
+		gate.handleResponse(extractId(broadcast), "yes");
+		expect((await p3).result).toBe("yes");
+	});
+
+	it("drops decisions for ids registered before a reset", async () => {
+		const broadcast = vi.fn();
+		const log = vi.fn();
+		const gate = createGate({ broadcast, log });
+
+		const p = gate.requestApproval(args({ path: "/tmp/rs2.ts", id: "rs2" }));
+		await waitForCall(broadcast);
+		gate.reset();
+		expect((await p).result).toBe("cancelled");
+
+		// The entry is gone, so the late decision is dropped and logged.
+		gate.handleResponse("rs2", "all");
+		expect(log).toHaveBeenCalledTimes(1);
+
+		// No memory was recorded — the next request still prompts.
+		const before = broadcast.mock.calls.length;
+		const p2 = gate.requestApproval(args({ path: "/tmp/rs2.ts" }));
+		await waitForCount(broadcast, before + 1);
+		gate.handleResponse(extractId(broadcast), "no");
+		expect((await p2).result).toBe("no");
+	});
+});
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------

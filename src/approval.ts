@@ -6,7 +6,8 @@
  *   - Queue serialization so two concurrent tool calls don't fight over
  *     one prompt (parallel tool execution is the common case).
  *   - First resolution wins (response); late events for unknown/settled
- *     ids are ignored.
+ *     ids are ignored — except a late "all", which still records the
+ *     per-file memory (the user did ask for it, on the other surface).
  *
  * The gate itself does not touch any pi UI; `requestApproval` returns one
  * of the strings below and the caller drives the prompt:
@@ -67,6 +68,11 @@ export interface CreateGateOptions {
 	 * `approval_resolved` broadcast.
 	 */
 	onResolved?: (id: string) => void;
+	/**
+	 * Optional logger for dropped events (unknown/already-decided ids).
+	 * Defaults to a no-op so the gate stays free of any logging backend.
+	 */
+	log?: (message: string) => void;
 }
 
 export interface ApprovalRequestOutcome {
@@ -90,6 +96,13 @@ export interface Gate {
 	handleCancel(id: string): void;
 	handleDisconnect(): void;
 	reset(): void;
+	/**
+	 * True when this path was already approved for the whole session
+	 * (per-file "all" memory). Callers use it to skip the pi-side prompt: a
+	 * short-circuited `requestApproval` settles immediately without a
+	 * broadcast, so there is nothing to ask.
+	 */
+	hasApproval(path: string): boolean;
 }
 
 /**
@@ -99,9 +112,24 @@ export interface Gate {
  */
 export function createGate(opts: CreateGateOptions): Gate {
 	const { broadcast, onResolved } = opts;
+	const log = opts.log ?? (() => undefined);
 
 	/** Per-file "a" memory. Cleared by `reset()`. */
 	const approvedFiles = new Set<string>();
+	/**
+	 * Every enqueued request, keyed by id, so a decision that arrives
+	 * while the request is still queued (only the pi prompt can answer a
+	 * request Neovim never saw) is remembered instead of dropped.
+	 *
+	 * A settled entry (its `decided` is set) is kept so a late answer from
+	 * the losing surface can still record `all` memory. Entries are removed
+	 * by `reset()`, by an abort, and by the dequeue-time short-circuit in
+	 * `runOne` (which is what makes a still-later answer "unknown").
+	 */
+	const registered = new Map<
+		string,
+		{ path: string; decided?: ApprovalDecision | "cancelled" }
+	>();
 
 	/** Currently pending request, if any. Queue is the tail of the chain. */
 	let pending: Pending | null = null;
@@ -135,11 +163,17 @@ export function createGate(opts: CreateGateOptions): Gate {
 			return Promise.resolve({ id: "", result: "all" });
 		}
 
+		// Generate the id up front (callers may supply their own) and
+		// register it before queueing: a decision for a request that is
+		// still behind the head must be recorded, not discarded.
+		const id = args.id ?? randomUUID();
+		registered.set(id, { path: args.path });
+
 		// Serialize: each request awaits the previous one settling.
 		// `gen` is captured at enqueue time — a queued request that starts
 		// running only after a session reset must short-circuit.
 		const gen = generation;
-		const next = queueTail.then(() => runOne(args, gen));
+		const next = queueTail.then(() => runOne(args, gen, id));
 		// Swallow rejections on the tail so a rejected request doesn't
 		// poison subsequent ones. `runOne` never rejects — but defensive.
 		queueTail = next.then(
@@ -152,23 +186,35 @@ export function createGate(opts: CreateGateOptions): Gate {
 	function runOne(
 		args: RequestApprovalArgs,
 		gen: number,
+		id: string,
 	): Promise<ApprovalRequestOutcome> {
 		return new Promise<ApprovalRequestOutcome>((resolveOuter) => {
 			// Short-circuit requests queued before a session reset: they must
 			// not broadcast into the new session.
 			if (gen !== generation) {
+				registered.delete(id);
 				resolveOuter({ id: "", result: "cancelled" });
+				return;
+			}
+
+			// A decision taken while this request was still queued settles it
+			// now, with no broadcast: Neovim never saw the request, so there
+			// is no prompt to raise (or dismiss) for it.
+			const decided = registered.get(id)?.decided;
+			if (decided) {
+				registered.delete(id);
+				resolveOuter({ id, result: decided });
 				return;
 			}
 
 			// Defensive: even if a path was approved between queueing and
 			// starting, short-circuit here.
 			if (approvedFiles.has(args.path)) {
+				registered.delete(id);
 				resolveOuter({ id: "", result: "all" });
 				return;
 			}
 
-			const id = args.id ?? randomUUID();
 			let onAbort: (() => void) | undefined;
 
 			let resolved = false;
@@ -204,11 +250,17 @@ export function createGate(opts: CreateGateOptions): Gate {
 			// Watch the abort signal: if the agent turn is aborted while the
 			// prompt is up (e.g. Ctrl+C), cancel the pending request so the
 			// tool call resolves instead of hanging.
-			onAbort = () => pendingEntry.resolve("cancelled");
+			onAbort = () => {
+				// An aborted turn can never be answered, so drop the entry:
+				// a late surface answer must not record memory for it.
+				registered.delete(id);
+				pendingEntry.resolve("cancelled");
+			};
 			if (args.signal && !args.signal.aborted) {
 				args.signal.addEventListener("abort", onAbort, { once: true });
 			} else if (args.signal?.aborted) {
 				// Already aborted before we started.
+				registered.delete(id);
 				pendingEntry.resolve("cancelled");
 				return;
 			}
@@ -223,16 +275,48 @@ export function createGate(opts: CreateGateOptions): Gate {
 	};
 
 	const handleResponse = (id: string, decision: ApprovalDecision) => {
-		if (pending?.id !== id) return; // late or unknown id; first wins
-		// If Neovim answered "all", remember the path so future edits to
-		// the same file are auto-approved.
-		if (decision === "all") approvedFiles.add(pending.path);
-		pending.resolve(decision);
+		const entry = registered.get(id);
+		if (!entry) {
+			// Late (already settled) or unknown id; first wins.
+			log(`approval: dropped response for unknown id ${id} (${decision})`);
+			return;
+		}
+		if (entry.decided) {
+			// Already settled: this is the losing surface answering late.
+			// Never re-settle or re-broadcast, but a late "all" still
+			// records the memory the user asked for — unless the settled
+			// decision was Esc ("cancelled"): the user never approved this
+			// path, so a late answer must not approve it forever.
+			if (decision === "all" && entry.decided !== "cancelled") {
+				approvedFiles.add(entry.path);
+			}
+			log(`approval: late answer for settled id ${id} (${decision})`);
+			return;
+		}
+		entry.decided = decision;
+		// Remember the path so future edits to the same file are
+		// auto-approved — even when this request is still queued.
+		if (decision === "all") approvedFiles.add(entry.path);
+		// Only the current head can settle right now; a queued request
+		// keeps its decision and `runOne` applies it without broadcasting.
+		if (pending?.id === id) pending.resolve(decision);
 	};
 
 	const handleCancel = (id: string) => {
-		if (pending?.id !== id) return; // late or unknown id; first wins
-		pending.resolve("cancelled");
+		const entry = registered.get(id);
+		if (!entry) {
+			// Late (already settled) or unknown id; first wins.
+			log(`approval: dropped cancel for unknown id ${id}`);
+			return;
+		}
+		if (entry.decided) {
+			// Settled already; a late cancel changes no state and never
+			// records memory.
+			log(`approval: late cancel for settled id ${id}`);
+			return;
+		}
+		entry.decided = "cancelled";
+		if (pending?.id === id) pending.resolve("cancelled");
 	};
 
 	const handleDisconnect = () => {
@@ -244,6 +328,7 @@ export function createGate(opts: CreateGateOptions): Gate {
 
 	const reset = () => {
 		approvedFiles.clear();
+		registered.clear();
 		generation++;
 		// Resolve any pending request as cancelled so callers waiting on the
 		// promise chain don't hang across session boundaries.
@@ -254,6 +339,8 @@ export function createGate(opts: CreateGateOptions): Gate {
 		queueTail = Promise.resolve();
 	};
 
+	const hasApproval = (path: string): boolean => approvedFiles.has(path);
+
 	return {
 		requestApproval,
 		handleAck,
@@ -261,5 +348,6 @@ export function createGate(opts: CreateGateOptions): Gate {
 		handleCancel,
 		handleDisconnect,
 		reset,
+		hasApproval,
 	};
 }
