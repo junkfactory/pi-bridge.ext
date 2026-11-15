@@ -760,6 +760,7 @@ function installStubGate(): { gate: Gate; restore: () => void } {
 		handleCancel: vi.fn(),
 		handleDisconnect: vi.fn(),
 		reset: vi.fn(),
+		hasApproval: vi.fn(() => false),
 	} as unknown as Gate;
 	const prev = gateGlobal.__piBridgeGate;
 	gateGlobal.__piBridgeGate = gate;
@@ -1085,6 +1086,36 @@ describe("extension — edit-approval origin gate", () => {
 	});
 });
 
+describe("extension — skip pi prompt for already-approved files", () => {
+	it("already-approved file: no pi-side prompt, gate outcome awaited directly", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			markNvimTurnActive();
+			(gate.hasApproval as ReturnType<typeof vi.fn>).mockReturnValue(true);
+			// A short-circuited request settles with no id and no broadcast.
+			(gate.requestApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
+				id: "",
+				result: "all",
+			});
+
+			const ctx = mockCtx();
+			const { handlers } = registerExtension();
+			const result = await handlers.tool_call(editEvent(), ctx);
+
+			// Approved: no block, and no dialog push/pop (nor editor
+			// save/restore) because the prompt was never rendered.
+			expect(result).toBeUndefined();
+			expect(ctx.ui.custom).not.toHaveBeenCalled();
+			expect(gate.hasApproval).toHaveBeenCalledTimes(1);
+			expect(gate.requestApproval).toHaveBeenCalledTimes(1);
+			expect(gate.handleResponse).not.toHaveBeenCalled();
+			expect(gate.handleCancel).not.toHaveBeenCalled();
+		} finally {
+			restore();
+		}
+	});
+});
+
 describe("extension — origin flag lifecycle", () => {
 	it("is cleared on agent_end", async () => {
 		markNvimTurnActive();
@@ -1148,6 +1179,163 @@ describe("extension — origin flag lifecycle", () => {
 		);
 		expect(gateGlobal.__piBridgeNvimTurnActive).toBe(true);
 	});
+});
+
+describe("extension — owner-only gate state", () => {
+	const startSession = (
+		handlers: ReturnType<typeof registerExtension>["handlers"],
+		sessionId: string,
+	) =>
+		handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, undefined, sessionId),
+		);
+
+	it("child session_start does not reset gate memory or the origin flag", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			const parent = registerExtension();
+			await startSession(parent.handlers, "parent-session");
+			expect(gate.reset).toHaveBeenCalledTimes(1);
+
+			// Per-file "all" memory recorded pre-fork (plus an in-flight
+			// nvim-originated turn) must survive a child session_start.
+			markNvimTurnActive();
+			const child = registerExtension();
+			await startSession(child.handlers, "child-session");
+			expect(gate.reset).toHaveBeenCalledTimes(1);
+			expect(gateGlobal.__piBridgeNvimTurnActive).toBe(true);
+		} finally {
+			restore();
+		}
+	});
+
+	it("owner session_start still resets the gate", async () => {
+		const { gate, restore } = installStubGate();
+		try {
+			const { handlers } = registerExtension();
+			// No owner yet — this session claims the socket.
+			await startSession(handlers, "owner-session");
+			expect(gate.reset).toHaveBeenCalledTimes(1);
+			// Owner restarts (e.g. /reload) — still resets.
+			await startSession(handlers, "owner-session");
+			expect(gate.reset).toHaveBeenCalledTimes(2);
+		} finally {
+			restore();
+		}
+	});
+
+	it("child agent_end does not clear the origin flag; owner agent_end does", async () => {
+		const parent = registerExtension();
+		await startSession(parent.handlers, "parent-session");
+		markNvimTurnActive();
+
+		const child = registerExtension();
+		await child.handlers.agent_end(
+			{ messages: [] },
+			mockCtx(undefined, undefined, "child-session"),
+		);
+		expect(gateGlobal.__piBridgeNvimTurnActive).toBe(true);
+
+		await parent.handlers.agent_end(
+			{ messages: [] },
+			mockCtx(undefined, undefined, "parent-session"),
+		);
+		expect(gateGlobal.__piBridgeNvimTurnActive).not.toBe(true);
+	});
+
+	it("child session_shutdown does not clear the origin flag; owner shutdown does", async () => {
+		const parent = registerExtension();
+		await startSession(parent.handlers, "parent-session");
+		markNvimTurnActive();
+
+		const child = registerExtension();
+		await child.handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "quit" },
+			mockCtx(undefined, undefined, "child-session"),
+		);
+		expect(gateGlobal.__piBridgeNvimTurnActive).toBe(true);
+		expect(stop).not.toHaveBeenCalled();
+
+		await parent.handlers.session_shutdown(
+			{ type: "session_shutdown", reason: "quit" },
+			mockCtx(undefined, undefined, "parent-session"),
+		);
+		expect(gateGlobal.__piBridgeNvimTurnActive).not.toBe(true);
+	});
+});
+
+describe("extension — owner-only gate reset on switch and tree navigation", () => {
+	const startSession = (
+		handlers: ReturnType<typeof registerExtension>["handlers"],
+		sessionId: string,
+	) =>
+		handlers.session_start(
+			{ type: "session_start", reason: "startup" },
+			mockCtx(undefined, undefined, sessionId),
+		);
+
+	const hooks = [
+		"session_before_switch",
+		"session_before_tree",
+		"session_tree",
+	] as const;
+
+	for (const hook of hooks) {
+		it(`child ${hook} keeps gate memory and the origin flag`, async () => {
+			const { gate, restore } = installStubGate();
+			try {
+				const parent = registerExtension();
+				await startSession(parent.handlers, "parent-session");
+				// reset() is what drops approvedFiles — only the owner's
+				// session_start above may have called it.
+				expect(gate.reset).toHaveBeenCalledTimes(1);
+
+				markNvimTurnActive();
+				const child = registerExtension();
+				await child.handlers[hook](
+					{},
+					mockCtx(undefined, undefined, "child-session"),
+				);
+				expect(gate.reset).toHaveBeenCalledTimes(1);
+				expect(gateGlobal.__piBridgeNvimTurnActive).toBe(true);
+			} finally {
+				restore();
+			}
+		});
+
+		it(`owner ${hook} resets the gate and clears the origin flag`, async () => {
+			const { gate, restore } = installStubGate();
+			try {
+				const { handlers } = registerExtension();
+				await startSession(handlers, "owner-session");
+				expect(gate.reset).toHaveBeenCalledTimes(1);
+
+				markNvimTurnActive();
+				await handlers[hook](
+					{},
+					mockCtx(undefined, undefined, "owner-session"),
+				);
+				expect(gate.reset).toHaveBeenCalledTimes(2);
+				expect(gateGlobal.__piBridgeNvimTurnActive).not.toBe(true);
+			} finally {
+				restore();
+			}
+		});
+
+		it(`${hook} resets while no owner has claimed the socket`, async () => {
+			const { gate, restore } = installStubGate();
+			try {
+				markNvimTurnActive();
+				const { handlers } = registerExtension();
+				await handlers[hook]({}, mockCtx(undefined, undefined, "any-session"));
+				expect(gate.reset).toHaveBeenCalledTimes(1);
+				expect(gateGlobal.__piBridgeNvimTurnActive).not.toBe(true);
+			} finally {
+				restore();
+			}
+		});
+	}
 });
 
 describe("extension — approval_resolved broadcast", () => {

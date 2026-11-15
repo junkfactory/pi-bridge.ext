@@ -38,7 +38,7 @@ import type {
 	WriteToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { createGate, type Gate } from "./approval.js";
+import { createGate, type Gate, type RequestApprovalArgs } from "./approval.js";
 import { buildDiff } from "./diff.js";
 import { handleMessage } from "./handler.js";
 import type { LogLevel } from "./log.js";
@@ -146,6 +146,18 @@ function wireDisconnectHandlers(): void {
 		// prior connection can never reach a future prompt.
 		setMirrorReady(false);
 	});
+}
+
+/**
+ * True when `sessionId` may touch shared gate state: the socket owner, or
+ * any session while no owner has claimed the socket yet. Child sessions
+ * (pi-subagents) share the process but not the socket, so they must not
+ * clear gate memory, the generation counter, or the origin flag mid-parent
+ * turn.
+ */
+function isOwnerSession(sessionId: string): boolean {
+	const owner = globalScope.__piBridgeOwnerSessionId;
+	return !owner || sessionId === owner;
 }
 
 /** Reset and re-install the gate (used by session lifecycle hooks). */
@@ -261,16 +273,18 @@ export default function (pi: ExtensionAPI) {
 	setLogLevel(level);
 
 	pi.on("session_start", async (_event, ctx) => {
-		// Edit-approval gate: clear per-file "all" memory at session start
-		// so a new session re-prompts even for previously-approved files.
-		// Also clears the origin flag — a fresh session starts in
-		// pi-typed mode.
-		resetGate();
-
 		const cwd = ctx.cwd ?? process.cwd();
 		const path = socketPath(cwd);
 
 		const sessionId = ctx.sessionManager.getSessionId();
+		const isOwner = isOwnerSession(sessionId);
+
+		// Edit-approval gate: clear per-file "all" memory at session start
+		// so a new session re-prompts even for previously-approved files.
+		// Also clears the origin flag — a fresh session starts in
+		// pi-typed mode. Owner only: a child/subagent session starting
+		// mid-parent-turn must not wipe the parent's gate state.
+		if (isOwner) resetGate();
 
 		info("Starting pi-bridge extension", {
 			cwd,
@@ -280,7 +294,7 @@ export default function (pi: ExtensionAPI) {
 			model: ctx.model?.name,
 			reason: _event.reason,
 			mapSize: getPiMap().size,
-			isOwner: !globalScope.__piBridgeOwnerSessionId,
+			isOwner,
 		});
 		ensureSocketDir();
 
@@ -476,30 +490,41 @@ export default function (pi: ExtensionAPI) {
 
 			const gate = getGate();
 			const id = randomUUID();
-
-			// Race the gate's natural settlement (nvim response, abort, or
-			// session reset) against the user's local pi-prompt decision.
-			// First answer wins; the other path is cleaned up best-effort.
-			const gatePromise = gate.requestApproval({
+			const approvalArgs: RequestApprovalArgs = {
 				id,
 				tool: toolName,
 				path: diffResult.path,
 				diff: diffResult.diff,
 				signal: ctx.signal,
-			});
+			};
+
+			// Per-file "all" memory: the gate settles this edit immediately
+			// (no broadcast, no nvim prompt). Skipping the pi-side prompt
+			// avoids pushing a dialog the user has already answered for this
+			// file, and the editor save/restore that comes with it.
+			if (gate.hasApproval(diffResult.path)) {
+				const outcome = await gate.requestApproval(approvalArgs);
+				return mapDecision(outcome.result, diffResult.path, toolName);
+			}
+
+			// Race the gate's natural settlement (nvim response, abort, or
+			// session reset) against the user's local pi-prompt decision.
+			// First answer wins; the other path is cleaned up best-effort.
+			const gatePromise = gate.requestApproval(approvalArgs);
 
 			// Pi-side prompt: independent of the gate's pending state. If
 			// nvim responds while the prompt is up, the gate settles and
 			// broadcasts approval_resolved (dismisses nvim's picker), and
-			// the pi prompt is dismissed below — a late keypress would be
-			// a no-op because handleResponse short-circuits on unknown ids.
+			// the pi prompt is dismissed below — a late keypress can never
+			// re-settle or re-broadcast; it only re-records "all" memory
+			// for a request the gate settled as anything but Esc.
 			const prompt = promptSelection(ctx);
 			const promptPromise = prompt.decision.then((decision: PromptDecision) => {
 				// Feed the pi-side decision back through the gate so
 				// per-file memory updates (for "all") and the single
 				// approval_resolved broadcast fire exactly once via
-				// onResolved. Esc cancels the pending request without
-				// marking the path as approved.
+				// onResolved. Esc only cancels a still-pending request;
+				// it never records per-file memory.
 				if (decision === "cancelled") {
 					gate.handleCancel(id);
 				} else {
@@ -510,8 +535,9 @@ export default function (pi: ExtensionAPI) {
 
 			// Await whichever settles first. The loser keeps running but
 			// its eventual resolution is ignored (gate.handleResponse
-			// no-ops on unknown ids; the prompt just resolves to a
-			// discarded decision).
+			// never re-settles a settled id — at most it records late
+			// "all" memory; the prompt just resolves to a discarded
+			// decision).
 			const winner = await Promise.race([
 				gatePromise.then((o) => ({ kind: "gate" as const, ...o })),
 				promptPromise.then((d) => ({ kind: "pi" as const, decision: d })),
@@ -548,12 +574,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", (_event, _ctx) => {
-		// End of the nvim-originated turn — drop the origin flag so any
-		// follow-up edits typed directly in pi auto-allow again.
-		setNvimTurnActive(false);
-
 		const cwd = _ctx.cwd ?? process.cwd();
 		const sessionId = _ctx.sessionManager.getSessionId();
+
+		// End of the nvim-originated turn — drop the origin flag so any
+		// follow-up edits typed directly in pi auto-allow again. Owner
+		// only: a child session's agent_end must not un-gate the parent's
+		// remaining nvim-originated edits.
+		if (isOwnerSession(sessionId)) setNvimTurnActive(false);
 		const event: OutboundEvent = {
 			type: "agent_end",
 			message: buildEndMessage(_event),
@@ -573,30 +601,38 @@ export default function (pi: ExtensionAPI) {
 	// the previous session had approved. Hooks ride alongside the
 	// existing session lifecycle handlers — don't replace them.
 	// -----------------------------------------------------------------
-	pi.on("session_before_switch", () => {
-		resetGate();
+	// Owner only, like the other lifecycle hooks: a child/subagent
+	// session switching must not clear the parent's gate memory, the
+	// generation counter, or the origin flag mid-parent-turn. pi always
+	// passes ctx; a bare invocation (no ctx) has no identity to compare,
+	// so it keeps the unguarded behavior of the no-owner-yet case.
+	pi.on("session_before_switch", (_event, ctx) => {
+		const sessionId = ctx?.sessionManager.getSessionId();
+		if (!sessionId || isOwnerSession(sessionId)) resetGate();
 	});
 	// Tree navigation (branch switch) invalidates contexts without firing
 	// session_before_switch, so clear gate/mirror state there too. Both
 	// sides of the navigation: before covers the transition (a cancelled
 	// navigation only costs one extra re-prompt), after covers the
 	// completed switch — resetGate() is idempotent.
-	pi.on("session_before_tree", () => {
-		resetGate();
+	pi.on("session_before_tree", (_event, ctx) => {
+		const sessionId = ctx?.sessionManager.getSessionId();
+		if (!sessionId || isOwnerSession(sessionId)) resetGate();
 	});
-	pi.on("session_tree", () => {
-		resetGate();
+	pi.on("session_tree", (_event, ctx) => {
+		const sessionId = ctx?.sessionManager.getSessionId();
+		if (!sessionId || isOwnerSession(sessionId)) resetGate();
 	});
 	// No reset on session_shutdown: session switches tear down via
 	// session_before_switch + the next session_start, and we want in-flight
 	// requests to settle first on a real quit.
 
 	pi.on("session_shutdown", async (event, ctx) => {
-		// Drop the origin flag on shutdown — leak-proofing. If a child
-		// session shutdown (non-owner) happens, the flag is cleared too,
-		// but the owner's session_start will re-establish it for any
-		// follow-up nvim prompts.
-		setNvimTurnActive(false);
+		const sessionId = ctx.sessionManager.getSessionId();
+		// Drop the origin flag on shutdown — leak-proofing. Owner only: a
+		// child session shutting down must not un-gate the parent's
+		// remaining nvim-originated edits.
+		if (isOwnerSession(sessionId)) setNvimTurnActive(false);
 		// Mirror: settle any in-flight structured prompts as cancelled
 		// and drop custom component refs. The wrappers are tied to the
 		// ui object built for this session bind, so on the next
@@ -604,7 +640,6 @@ export default function (pi: ExtensionAPI) {
 		// this reset is for callers already awaiting the race.
 		getMirror()?.reset();
 
-		const sessionId = ctx.sessionManager.getSessionId();
 		getPiMap().delete(sessionId);
 		info("Removed session from pi map", {
 			sessionId,
