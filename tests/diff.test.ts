@@ -1,6 +1,13 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+	mkdirSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildDiff } from "../src/diff.js";
 
@@ -9,6 +16,8 @@ let tmpDir: string;
 beforeAll(() => {
 	tmpDir = join(tmpdir(), `pi-bridge-diff-${process.pid}-${Date.now()}`);
 	mkdirSync(tmpDir, { recursive: true });
+	// Canonical base so path assertions match the realpath'd result.
+	tmpDir = realpathSync(tmpDir);
 });
 
 afterAll(() => {
@@ -281,5 +290,129 @@ describe("buildDiff — fs error guards", () => {
 			tmpdir(),
 		);
 		expect(result).toBeNull();
+	});
+});
+
+describe("buildDiff — canonical path identity", () => {
+	it("expands a leading ~ to $HOME", async () => {
+		const name = `.pi-bridge-diff-tilde-${process.pid}.lua`;
+		const result = await buildDiff(
+			"write",
+			{ path: `~/${name}`, content: "x\n" },
+			tmpDir,
+		);
+		expect(result?.path).toBe(join(homedir(), name));
+	});
+
+	it("strips an @ prefix", async () => {
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src", "x.lua"), "old\n", "utf-8");
+		const result = await buildDiff(
+			"write",
+			{ path: "@src/x.lua", content: "new\n" },
+			tmpDir,
+		);
+		expect(result?.path).toBe(join(tmpDir, "src", "x.lua"));
+		expect(result?.diff).toContain("-old");
+	});
+
+	it("unifies symlinked and real paths when realpath succeeds", async () => {
+		const realDir = join(tmpDir, "symlink-target");
+		mkdirSync(realDir, { recursive: true });
+		writeFileSync(join(realDir, "x.lua"), "old\n", "utf-8");
+		const linkDir = join(tmpDir, "symlink-alias");
+		symlinkSync(realDir, linkDir, "dir");
+
+		const viaLink = await buildDiff(
+			"write",
+			{ path: join(linkDir, "x.lua"), content: "new\n" },
+			tmpDir,
+		);
+		const viaReal = await buildDiff(
+			"write",
+			{ path: join(realDir, "x.lua"), content: "new\n" },
+			tmpDir,
+		);
+		expect(viaLink?.path).toBe(join(realDir, "x.lua"));
+		expect(viaLink?.path).toBe(viaReal?.path);
+	});
+
+	it("falls back to the resolved absolute for a nonexistent path", async () => {
+		const result = await buildDiff(
+			"write",
+			{ path: join(tmpDir, "nope", "new.lua"), content: "fresh\n" },
+			tmpDir,
+		);
+		expect(result?.path).toBe(join(tmpDir, "nope", "new.lua"));
+		expect(result?.diff).toContain("+fresh");
+	});
+});
+
+describe("buildDiff — canonical path identity (pi parity)", () => {
+	// Space variants pi's `normalizePath` collapses to U+0020
+	// (dist/utils/paths.js: `UNICODE_SPACES`).
+	const spaceVariants: Array<[string, string]> = [
+		["nbsp", "\u00A0"],
+		["en", "\u2002"],
+		["narrow-nbsp", "\u202F"],
+		["ideo", "\u3000"],
+	];
+
+	for (const [label, space] of spaceVariants) {
+		it(`collapses a ${label} space to a plain space`, async () => {
+			const filename = `space ${label}.txt`;
+			const canonical = writeFile(filename, "old\n");
+			const variant = join(tmpDir, filename.replace(" ", space));
+			const result = await buildDiff(
+				"write",
+				{ path: variant, content: "new\n" },
+				tmpDir,
+			);
+			expect(result?.path).toBe(canonical);
+			expect(result?.diff).toContain("-old");
+		});
+	}
+
+	it("decodes a file:// URL to the filesystem path", async () => {
+		const file = writeFile("url form.txt", "old\n");
+		const result = await buildDiff(
+			"write",
+			{ path: pathToFileURL(file).href, content: "new\n" },
+			tmpDir,
+		);
+		expect(pathToFileURL(file).href).toContain("%20");
+		expect(result?.path).toBe(file);
+		expect(result?.diff).toContain("-old");
+	});
+
+	it("normalizes unicode spaces before file:// decoding", async () => {
+		const file = writeFile("url nbsp.txt", "old\n");
+		// Literal NBSP inside the URL collapses first, then decodes.
+		const raw = `file://${file.replace(" ", "\u00A0")}`;
+		const result = await buildDiff(
+			"write",
+			{ path: raw, content: "new\n" },
+			tmpDir,
+		);
+		expect(result?.path).toBe(file);
+	});
+
+	it("combines @-strip and tilde expansion", async () => {
+		const name = `.pi-bridge-diff-at-tilde-${process.pid}.lua`;
+		const result = await buildDiff(
+			"write",
+			{ path: `@~/${name}`, content: "x\n" },
+			tmpDir,
+		);
+		expect(result?.path).toBe(join(homedir(), name));
+	});
+
+	it("keeps the ENOENT fallback for nonexistent unicode-space paths", async () => {
+		const result = await buildDiff(
+			"write",
+			{ path: join(tmpDir, "ghost\u00A0dir", "x.lua"), content: "x\n" },
+			tmpDir,
+		);
+		expect(result?.path).toBe(join(tmpDir, "ghost dir", "x.lua"));
 	});
 });

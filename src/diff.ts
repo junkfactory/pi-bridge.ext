@@ -6,8 +6,10 @@
  * in the TUI and to send to Neovim for the floating approval prompt.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { generateUnifiedPatch } from "@earendil-works/pi-coding-agent";
 import type { ApprovalTool } from "./protocol.js";
 
@@ -40,13 +42,37 @@ export type WriteInput = { path: string; content: string };
 export type DiffInput = EditInput | WriteInput;
 
 /**
- * Resolve `input.path` against `cwd` when it is not absolute.
- *
- * Mirrors the convention used by pi's built-in tools: relative paths are
- * joined to cwd; absolute paths are returned unchanged.
+ * Unicode space variants pi collapses to a plain space. Copied verbatim from
+ * `UNICODE_SPACES` in dist/utils/paths.js (pi 1.5.2).
  */
-function resolvePath(path: string, cwd: string): string {
-	return isAbsolute(path) ? path : resolve(cwd, path);
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/**
+ * Canonicalize `input.path` to pi's own file identity: unicode-space
+ * collapse, `@`-prefix strip, tilde expansion, `file://` URL decoding,
+ * resolve against `cwd` (absolute inputs included), then `realpath` with the
+ * resolved absolute as the ENOENT fallback.
+ *
+ * Mirrors pi's `normalizePath` with
+ * `{ normalizeUnicodeSpaces: true, stripAtPrefix: true }` (dist/utils/paths.js,
+ * called by `resolveToCwd` in dist/core/tools/path-utils.js) and
+ * `getMutationQueueKey` (dist/core/tools/file-mutation-queue.js).
+ */
+function canonicalPath(path: string, cwd: string): string {
+	// Order matches pi: unicode spaces, then `@` strip, then tilde, then
+	// `file://` — all before resolving against `cwd`.
+	let p = path.replace(UNICODE_SPACES, " ");
+	if (p.startsWith("@")) p = p.slice(1);
+	const home = homedir();
+	if (p === "~") p = home;
+	else if (p.startsWith("~/")) p = join(home, p.slice(2));
+	else if (/^file:\/\//.test(p)) p = fileURLToPath(p);
+	const abs = resolve(cwd, p);
+	try {
+		return realpathSync(abs);
+	} catch {
+		return abs;
+	}
 }
 
 /**
@@ -138,7 +164,7 @@ export async function buildDiff(
 ): Promise<BuildDiffResult | null> {
 	if (typeof input?.path !== "string" || input.path.length === 0) return null;
 
-	const absPath = resolvePath(input.path, cwd);
+	const absPath = canonicalPath(input.path, cwd);
 
 	if (toolName === "write") {
 		const write = input as WriteInput;
